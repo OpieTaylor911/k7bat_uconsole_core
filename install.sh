@@ -90,6 +90,29 @@ fi
 log "Installing application"
 mkdir -p "$PREFIX"
 install -m 0755 "$SCRIPT_DIR/app/k7bat-uconsole-status.py" "$PREFIX/k7bat-uconsole-status.py"
+
+# Install v2.0.0 UI components
+if [ -d "$SCRIPT_DIR/app/styles" ]; then
+  mkdir -p "$PREFIX/styles"
+  for style_file in "$SCRIPT_DIR/app/styles/"*.css; do
+    if [ -f "$style_file" ]; then
+      install -m 0644 "$style_file" "$PREFIX/styles/"
+    fi
+  done
+fi
+
+if [ -d "$SCRIPT_DIR/app/widgets" ]; then
+  mkdir -p "$PREFIX/widgets"
+  for widget_file in "$SCRIPT_DIR/app/widgets/"*.py; do
+    if [ -f "$widget_file" ]; then
+      install -m 0644 "$widget_file" "$PREFIX/widgets/"
+    fi
+  done
+fi
+
+if [ -f "$SCRIPT_DIR/app/navigation.py" ]; then
+  install -m 0644 "$SCRIPT_DIR/app/navigation.py" "$PREFIX/"
+fi
 if [ -f "$SCRIPT_DIR/assets/plugins.default.json" ]; then
   install -m 0644 "$SCRIPT_DIR/assets/plugins.default.json" "$PREFIX/plugins.default.json"
 fi
