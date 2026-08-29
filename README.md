@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # k7bat uConsole Core (v2.0.0+)
 
 This is the main application repository for k7bat uConsole Status App version 2.0.0 and onward.
@@ -48,3 +49,7 @@ See install.sh for installation instructions. The installer will:
 ## License
 
 MIT License - See LICENSE file for details.
+=======
+# k7bat_uconsole_core
+Field Computer Core Application for Field Operations
+>>>>>>> 1b3437add97168dc95ab11cec24b42b78ec8de2a
