@@ -58,7 +58,7 @@ except ImportError:
                 self.set_label(label)
 
 APP_NAME = "K7BAT uConsole Status App"
-APP_VERSION = "1.2.1"
+APP_VERSION = "2.0.0"
 REFRESH_SECONDS = 4
 SERVICE_PRIV_HINT = "Enable passwordless service control (sudoers) for bluetooth/readsb."
 DEFAULT_GITHUB_REPO = "OpieTaylor911/k7batuConsoleStatusApp"
