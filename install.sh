@@ -90,6 +90,10 @@ fi
 log "Installing application"
 mkdir -p "$PREFIX"
 install -m 0755 "$SCRIPT_DIR/app/k7bat-uconsole-status.py" "$PREFIX/k7bat-uconsole-status.py"
+install -m 0644 "$SCRIPT_DIR/app/radio_coordinator.py" "$PREFIX/radio_coordinator.py"
+install -m 0644 "$SCRIPT_DIR/app/status_api.py" "$PREFIX/status_api.py"
+install -m 0644 "$SCRIPT_DIR/app/ac1200_diagnostics.py" "$PREFIX/ac1200_diagnostics.py"
+install -m 0755 "$SCRIPT_DIR/app/ac1200_diagnostics.py" /usr/local/bin/k7bat-ac1200-diagnostics
 
 # Install v2.0.0 UI components
 if [ -d "$SCRIPT_DIR/app/styles" ]; then
@@ -161,6 +165,33 @@ if [ -d "$SCRIPT_DIR/app/plugins" ]; then
       fi
     fi
   done
+fi
+
+# Keep SDRDecoder as an external plugin rather than vendoring its source into core.
+if command -v git >/dev/null 2>&1; then
+  EXTERNAL_PLUGIN_DIR="${GUI_HOME:-/home/bcaddy}/.config/k7bat-uconsole-status/plugins/sdrdecoder"
+  mkdir -p "$(dirname "$EXTERNAL_PLUGIN_DIR")"
+  if [[ -d "$EXTERNAL_PLUGIN_DIR/.git" ]]; then
+    git -c safe.directory="$EXTERNAL_PLUGIN_DIR" -C "$EXTERNAL_PLUGIN_DIR" pull --ff-only || warn "SDRDecoder update skipped"
+  else
+    rm -rf "$EXTERNAL_PLUGIN_DIR"
+    git clone --depth 1 https://github.com/gWareCoder/sdrdecoder.git "$EXTERNAL_PLUGIN_DIR" || \
+      warn "SDRDecoder clone failed; plugin launcher will remain unavailable"
+  fi
+  if [[ -n "${GUI_USER:-}" && -d "$EXTERNAL_PLUGIN_DIR" ]]; then
+    chown -R "$GUI_USER:$GUI_USER" "$EXTERNAL_PLUGIN_DIR"
+  fi
+else
+  warn "git not installed; SDRDecoder plugin was not downloaded"
+fi
+
+# The legacy launcher imports user plugins from PREFIX/plugins.
+if [[ -f "$SCRIPT_DIR/app/plugins/sdrdecoder_plugin.py" ]]; then
+  mkdir -p "$PREFIX/plugins"
+  install -m 0644 "$SCRIPT_DIR/app/plugins/sdrdecoder_plugin.py" "$PREFIX/plugins/sdrdecoder_plugin.py"
+fi
+if [[ -f "$SCRIPT_DIR/app/plugins.json" ]]; then
+  install -m 0644 "$SCRIPT_DIR/app/plugins.json" "$PREFIX/plugins.json"
 fi
 
 install -m 0755 "$SCRIPT_DIR/scripts/k7bat-uconsole-status" /usr/local/bin/k7bat-uconsole-status
