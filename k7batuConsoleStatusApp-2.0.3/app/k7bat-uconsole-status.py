@@ -1705,7 +1705,7 @@ class App(Gtk.Window):
         network_page = add_tab("Network")
         gps_page = add_tab("GPS")
         gps_cols = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        launchers_page = add_tab("Launchers")
+        task_page = add_tab("TaskManager")
         plugins_page = add_tab("Plugins")
 
         status_cols = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -1862,6 +1862,36 @@ class App(Gtk.Window):
         self.add_row(gpsqbox, "gps_quality", "Quality")
         self.add_row(gpsqbox, "dop_summary", "DOP")
         self.add_row(gpsqbox, "gps_trend", "Trend")
+
+        # TaskManager tab: compact host summary, services, and process detail.
+        task_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        task_title = Gtk.Label(label="System Tasks")
+        task_title.set_xalign(0)
+        task_title.get_style_context().add_class("section-title")
+        task_header.pack_start(task_title, True, True, 0)
+        task_refresh = Gtk.Button(label="Refresh")
+        self.decorate_button(task_refresh, "dashboard", "Refresh task list")
+        task_refresh.connect("clicked", lambda _b: self.refresh_task_manager())
+        task_header.pack_end(task_refresh, False, False, 0)
+        task_page.pack_start(task_header, False, False, 0)
+
+        self.task_summary = Gtk.Label(label="Loading system details...")
+        self.task_summary.set_xalign(0)
+        self.task_summary.set_line_wrap(True)
+        self.task_summary.get_style_context().add_class("subtle")
+        task_page.pack_start(self.task_summary, False, False, 0)
+
+        task_scroll = Gtk.ScrolledWindow()
+        task_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        task_scroll.set_vexpand(True)
+        self.task_text = Gtk.TextView()
+        self.task_text.set_editable(False)
+        self.task_text.set_cursor_visible(False)
+        self.task_text.set_monospace(True)
+        self.task_text.set_wrap_mode(Gtk.WrapMode.NONE)
+        task_scroll.add(self.task_text)
+        task_page.pack_start(task_scroll, True, True, 0)
+        self.refresh_task_manager()
 
                 # Plugins section (on its own tab, launchers moved to main page)
         pluginbox = self.make_frame(plugins_page, "Plugins")
@@ -4904,6 +4934,52 @@ class App(Gtk.Window):
                 "battery_state": battery_state,
             },
         }
+
+    def refresh_task_manager(self):
+        """Refresh host resource, service, and process details."""
+        try:
+            load = Path("/proc/loadavg").read_text(encoding="utf-8").split()
+            uptime = Path("/proc/uptime").read_text(encoding="utf-8").split()[0]
+            uptime_seconds = int(float(uptime))
+            uptime_text = f"{uptime_seconds // 86400}d {(uptime_seconds % 86400) // 3600:02d}h {(uptime_seconds % 3600) // 60:02d}m"
+        except Exception:
+            load = ["unknown"]
+            uptime_text = "unknown"
+
+        try:
+            memory = subprocess.run(
+                ["free", "-h"], capture_output=True, text=True, timeout=3, check=False
+            ).stdout.strip()
+        except Exception:
+            memory = "memory details unavailable"
+
+        try:
+            disk = shutil.disk_usage("/")
+            disk_text = f"Disk: {disk.free / (1024 ** 3):.1f} GiB free / {disk.total / (1024 ** 3):.1f} GiB"
+        except Exception:
+            disk_text = "Disk: unavailable"
+
+        service_names = ["k7bat-status-api", "gpsd", "gpsd.socket", "bluetooth", "readsb", "NetworkManager"]
+        service_lines = []
+        for service in service_names:
+            service_lines.append(f"{service:20} {service_state(service)}")
+
+        try:
+            processes = subprocess.run(
+                ["ps", "-eo", "pid,ppid,user,%cpu,%mem,stat,etime,comm,args", "--sort=-%cpu"],
+                capture_output=True, text=True, timeout=5, check=False
+            ).stdout.strip()
+            process_lines = "\n".join(processes.splitlines()[:41])
+        except Exception:
+            process_lines = "process details unavailable"
+
+        self.task_summary.set_text(
+            f"Load: {' '.join(load[:3])}    Uptime: {uptime_text}\n"
+            f"{disk_text}\n\nServices:\n" + "\n".join(service_lines)
+        )
+        self.task_text.get_buffer().set_text(
+            "TOP PROCESSES (sorted by CPU)\n\n" + process_lines
+        )
 
     def refresh_async(self):
         import sys
