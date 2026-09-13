@@ -1826,6 +1826,16 @@ class App(Gtk.Window):
         launch_row.add(gps_nav_btn)
         self.refresh_gps_nav_button()
 
+        sidekick_btn = Gtk.Button(label="Sidekick Manager")
+        self.decorate_button(sidekick_btn, "radio", "Open Sidekick Manager")
+        self.launch_actions["Sidekick Manager"] = (
+            "python_module",
+            "sidekick_setup_ui.SidekickSetupWindow",
+        )
+        sidekick_btn.connect("clicked", lambda _b: self.on_launch_clicked("Sidekick Manager"))
+        self.launch_buttons["Sidekick Manager"] = sidekick_btn
+        launch_row.add(sidekick_btn)
+
         for entry in BUILTIN_LAUNCHERS:
             name = entry["name"]
             btn = Gtk.Button(label=name)
