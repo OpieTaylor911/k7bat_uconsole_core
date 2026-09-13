@@ -24,6 +24,13 @@ import json
 import threading
 import subprocess
 import shutil
+import hashlib
+import hmac
+import secrets
+import sqlite3
+import time
+import uuid
+from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
@@ -430,6 +437,146 @@ _V2_PROFILE_STATE = {
     "screens": list(_V2_ALLOWED_SCREENS),
 }
 
+_V2_DB_PATH = Path(os.environ.get(
+    "K7BAT_API_DB",
+    Path.home() / ".config" / "k7bat-uconsole-status" / "devices.sqlite3",
+))
+_V2_DB_LOCK = threading.Lock()
+
+
+def _v2_db_connect():
+    _V2_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(str(_V2_DB_PATH), timeout=10)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _v2_init_db():
+    with _V2_DB_LOCK, _v2_db_connect() as connection:
+        connection.executescript("""
+            CREATE TABLE IF NOT EXISTS devices (
+                device_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                mac_address TEXT NOT NULL,
+                board TEXT NOT NULL,
+                firmware TEXT NOT NULL,
+                display_json TEXT NOT NULL,
+                features_json TEXT NOT NULL,
+                api_key_hash TEXT,
+                created_at TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                revoked_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS enrollments (
+                enrollment_id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                mac_address TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                expires_at REAL NOT NULL,
+                used_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS command_jobs (
+                command_id TEXT PRIMARY KEY,
+                device_id TEXT,
+                state TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                result_json TEXT,
+                created_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event TEXT NOT NULL,
+                device_id TEXT,
+                details_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+        """)
+
+
+def _v2_hash_secret(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _v2_audit(event, device_id=None, details=None):
+    with _V2_DB_LOCK, _v2_db_connect() as connection:
+        connection.execute(
+            "INSERT INTO audit_log(event, device_id, details_json, created_at) VALUES (?, ?, ?, ?)",
+            (event, device_id, json.dumps(details or {}), datetime.now().isoformat()),
+        )
+
+
+def _v2_load_device(device_id):
+    with _V2_DB_LOCK, _v2_db_connect() as connection:
+        row = connection.execute("SELECT * FROM devices WHERE device_id = ?", (device_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def _v2_public_device(row):
+    if not row:
+        return None
+    return {
+        "device_id": row["device_id"],
+        "name": row["name"],
+        "mac_address": row["mac_address"],
+        "board": row["board"],
+        "firmware": row["firmware"],
+        "display": json.loads(row["display_json"]),
+        "features": json.loads(row["features_json"]),
+        "created_at": row["created_at"],
+        "last_seen": row["last_seen"],
+        "status": "revoked" if row["revoked_at"] else "active",
+    }
+
+
+def _v2_auth_device(handler, device_id=None):
+    authorization = handler.headers.get("Authorization", "")
+    if not authorization.startswith("Bearer "):
+        return False, {"error": {"code": "unauthorized", "message": "A valid Sidekick API key is required."}}
+    supplied_hash = _v2_hash_secret(authorization[7:].strip())
+    target_id = device_id or handler.headers.get("X-Device-ID")
+    if not target_id:
+        return False, {"error": {"code": "missing_device_id", "message": "device_id is required for authenticated calls."}}
+    row = _v2_load_device(target_id)
+    if not row or row["revoked_at"] or not hmac.compare_digest(row["api_key_hash"] or "", supplied_hash):
+        _v2_audit("auth.failure", target_id, {})
+        return False, {"error": {"code": "unauthorized", "message": "A valid Sidekick API key is required."}}
+    return True, row
+
+
+def _v2_db_has_devices():
+    with _V2_DB_LOCK, _v2_db_connect() as connection:
+        return connection.execute("SELECT 1 FROM devices LIMIT 1").fetchone() is not None
+
+
+def _v2_create_command_job(data, result, device_id=None):
+    command_id = result.get("command_id")
+    if not command_id:
+        return result
+    now = datetime.now().isoformat()
+    with _V2_DB_LOCK, _v2_db_connect() as connection:
+        connection.execute(
+            "INSERT OR REPLACE INTO command_jobs(command_id, device_id, state, request_json, result_json, created_at, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (command_id, device_id, result.get("state", "queued"), json.dumps(data),
+             json.dumps(result), now, now if result.get("state") == "completed" else None),
+        )
+    _v2_audit("command.queued", device_id, {"command_id": command_id})
+    return result
+
+
+def _v2_get_job(command_id):
+    with _V2_DB_LOCK, _v2_db_connect() as connection:
+        row = connection.execute("SELECT * FROM command_jobs WHERE command_id = ?", (command_id,)).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    result["request"] = json.loads(result.pop("request_json"))
+    result["result"] = json.loads(result.pop("result_json")) if result.get("result_json") else None
+    return result
+
+
+_v2_init_db()
+
 
 def _normalize_v2_network_status():
     wifi = _status_data.get("wifi", {})
@@ -532,6 +679,21 @@ def _v2_register_device(data):
         "last_seen": datetime.now().isoformat(),
     }
     _V2_DEVICE_REGISTRY[device_id] = device
+    now = datetime.now().isoformat()
+    with _V2_DB_LOCK, _v2_db_connect() as connection:
+        connection.execute(
+            """INSERT INTO devices
+            (device_id, name, mac_address, board, firmware, display_json, features_json, created_at, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+            name=excluded.name, mac_address=excluded.mac_address, board=excluded.board,
+            firmware=excluded.firmware, display_json=excluded.display_json,
+            features_json=excluded.features_json, last_seen=excluded.last_seen""",
+            (device_id, device["name"], _normalize_mac_address(data.get("mac_address")),
+             device["board"], device["firmware"], json.dumps(device["display"]),
+             json.dumps(device["features"]), now, now),
+        )
+    _v2_audit("device.registered", device_id, {"board": device["board"]})
 
     response = {
         "accepted": True,
@@ -560,27 +722,30 @@ def _v2_handle_command(data):
         if value not in _V2_ALLOWED_PROFILES:
             return False, {"error": {"code": "profile_not_allowed", "message": "The requested profile is not available to this device."}}
         _V2_PROFILE_STATE["profile"] = value
-        return True, {
+        command_id = f"cmd-{uuid.uuid4().hex}"
+        response = {
             "accepted": True,
-            "command_id": f"cmd-{int(datetime.now().timestamp() * 1000)}",
+            "command_id": command_id,
             "state": "queued",
             "profile": value,
         }
+        return True, response
 
     if target == "screen" and command == "switch":
         if value not in _V2_ALLOWED_SCREENS:
             return False, {"error": {"code": "screen_not_allowed", "message": "The requested screen is not available to this device."}}
         _V2_PROFILE_STATE["screen"] = value
+        command_id = f"cmd-{uuid.uuid4().hex}"
         return True, {
             "accepted": True,
-            "command_id": f"cmd-{int(datetime.now().timestamp() * 1000)}",
+            "command_id": command_id,
             "state": "queued",
             "screen": value,
         }
 
     return True, {
         "accepted": True,
-        "command_id": f"cmd-{int(datetime.now().timestamp() * 1000)}",
+        "command_id": f"cmd-{uuid.uuid4().hex}",
         "state": "queued",
         "target": target,
         "command": command,
@@ -594,16 +759,26 @@ def _normalize_mac_address(mac):
     return mac.strip().lower().replace('-', ':').replace(' ', ':')
 
 
-def _v2_create_enrollment_code(device_id, mac_address):
+def _v2_create_enrollment_code(device_id, mac_address, name=None):
     key = _normalize_mac_address(mac_address) or device_id
-    code = str(int(datetime.now().timestamp() * 1000) % 1000000).zfill(6)
+    code = f"{secrets.randbelow(1000000):06d}"
+    enrollment_id = uuid.uuid4().hex
+    expires_at = time.time() + 300
     _V2_PAIRING_REGISTRY[key] = {
+        "enrollment_id": enrollment_id,
         "device_id": device_id,
+        "name": name or device_id,
         "mac_address": _normalize_mac_address(mac_address),
         "code": code,
-        "expires_at": datetime.now().timestamp() + 300,
+        "expires_at": expires_at,
         "status": "pending",
     }
+    with _V2_DB_LOCK, _v2_db_connect() as connection:
+        connection.execute(
+            "INSERT INTO enrollments(enrollment_id, device_id, mac_address, code_hash, expires_at) VALUES (?, ?, ?, ?, ?)",
+            (enrollment_id, device_id, _normalize_mac_address(mac_address), _v2_hash_secret(code), expires_at),
+        )
+    _v2_audit("enrollment.started", device_id, {"enrollment_id": enrollment_id})
     return code
 
 
@@ -621,18 +796,33 @@ def _v2_confirm_enrollment(data):
     key = mac_address or device_id
     pending = _V2_PAIRING_REGISTRY.get(key)
     if not pending:
-        return False, {"error": {"code": "no_pending_pairing", "message": "No pending enrollment found for this device."}}
+        with _V2_DB_LOCK, _v2_db_connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM enrollments WHERE device_id = ? AND mac_address = ? ORDER BY expires_at DESC LIMIT 1",
+                (device_id, mac_address),
+            ).fetchone()
+        if not row:
+            return False, {"error": {"code": "no_pending_pairing", "message": "No pending enrollment found for this device."}}
+        pending = dict(row)
+        pending.update({
+            "code": code,
+            "status": "paired" if row["used_at"] else "pending",
+            "expires_at": row["expires_at"],
+        })
     if pending["device_id"] != device_id:
         return False, {"error": {"code": "device_mismatch", "message": "Enrollment code does not match device_id."}}
-    if pending["code"] != code:
+    if pending.get("code") != code and not hmac.compare_digest(pending.get("code_hash", ""), _v2_hash_secret(code)):
+        return False, {"error": {"code": "invalid_code", "message": "Enrollment code is invalid or expired."}}
+    if pending["status"] != "pending" or time.time() >= pending["expires_at"]:
         return False, {"error": {"code": "invalid_code", "message": "Enrollment code is invalid or expired."}}
 
-    api_key = f"k7bat_{device_id.lower().replace(' ', '_')}_{int(datetime.now().timestamp() * 1000)}"
+    api_key = f"k7bat_{secrets.token_urlsafe(32)}"
+    issued_at = datetime.now().isoformat()
     _V2_API_KEYS[device_id] = {
         "api_key": api_key,
         "mac_address": mac_address,
         "device_id": device_id,
-        "issued_at": datetime.now().isoformat(),
+        "issued_at": issued_at,
     }
     pending["status"] = "paired"
     pending["api_key"] = api_key
@@ -643,6 +833,22 @@ def _v2_confirm_enrollment(data):
         "api_key": api_key,
         "last_seen": datetime.now().isoformat(),
     }
+    with _V2_DB_LOCK, _v2_db_connect() as connection:
+        connection.execute(
+            "UPDATE enrollments SET used_at = ? WHERE enrollment_id = ?",
+            (issued_at, pending.get("enrollment_id") or pending["enrollment_id"]),
+        )
+        connection.execute(
+            """INSERT INTO devices
+            (device_id, name, mac_address, board, firmware, display_json, features_json,
+             api_key_hash, created_at, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET api_key_hash=excluded.api_key_hash,
+            mac_address=excluded.mac_address, last_seen=excluded.last_seen, revoked_at=NULL""",
+            (device_id, pending.get("name") or device_id, mac_address, "sidekick", "unknown",
+             "{}", "{}", _v2_hash_secret(api_key), issued_at, issued_at),
+        )
+    _v2_audit("enrollment.confirmed", device_id, {"enrollment_id": pending["enrollment_id"]})
     return True, {
         "status": "paired",
         "device_id": device_id,
@@ -719,11 +925,44 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
         """Handle GET requests."""
         parsed_path = urlparse(self.path)
         path = parsed_path.path
+
         query_params = parse_qs(parsed_path.query)
         
         # Update status data on each request for fresh data
         update_status_data()
-        
+
+        if path == '/api/v2/ready':
+            self.send_json_response({
+                "status": "ready",
+                "api": True,
+                "database": _V2_DB_PATH.exists(),
+                "integrations": {
+                    "gps": _status_data.get("gps", {}).get("reason") != "gpsd unavailable",
+                    "radio": RADIO_COORDINATOR is not None,
+                },
+            })
+            return
+
+        if path == '/api/v2/devices':
+            with _V2_DB_LOCK, _v2_db_connect() as connection:
+                rows = connection.execute("SELECT * FROM devices ORDER BY created_at DESC").fetchall()
+            self.send_json_response({"devices": [_v2_public_device(row) for row in rows]})
+            return
+
+        if path.startswith('/api/v2/command/'):
+            command_id = path.rsplit('/', 1)[-1]
+            job = _v2_get_job(command_id)
+            if not job:
+                self.send_json_response({"error": {"code": "command_not_found", "message": "Command job not found."}}, 404)
+                return
+            if job.get("device_id"):
+                authenticated, auth_result = _v2_auth_device(self, job["device_id"])
+                if not authenticated:
+                    self.send_json_response(auth_result, 401)
+                    return
+            self.send_json_response(job)
+            return
+
         if path == '/api/status' or path == '/':
             # Return full status
             with _status_lock:
@@ -779,11 +1018,28 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
 
         elif path.startswith('/api/v2/device/'):
             device_id = path.rsplit('/', 1)[-1]
-            device = _V2_DEVICE_REGISTRY.get(device_id)
+            if path.endswith('/config'):
+                device_id = path.split('/')[-2]
+            device = _v2_load_device(device_id) or _V2_DEVICE_REGISTRY.get(device_id)
             if not device:
                 self.send_json_response({"error": {"code": "device_not_found", "message": f"Device '{device_id}' has not registered."}}, 404)
                 return
-            self.send_json_response({"device": device})
+            authenticated, auth_result = _v2_auth_device(self, device_id)
+            if not authenticated:
+                self.send_json_response(auth_result, 401)
+                return
+            if path.endswith('/config'):
+                self.send_json_response({
+                    "device_id": device_id,
+                    "api_url": f"http://{self.server.server_address[0]}:{self.server.server_address[1]}",
+                    "heartbeat_seconds": 30,
+                    "profile": _V2_PROFILE_STATE.get("profile", "FIELD"),
+                    "screen": _V2_PROFILE_STATE.get("screen", "HOME"),
+                    "allowed_screens": list(_V2_ALLOWED_SCREENS),
+                    "features": {"websocket": False, "commands": True, "ota": False},
+                })
+            else:
+                self.send_json_response({"device": _v2_public_device(device) if isinstance(device, dict) and "device_id" in device else device})
 
         elif path == '/ws/v2':
             self.send_json_response({
@@ -865,6 +1121,18 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
         parsed_path = urlparse(self.path)
         path = parsed_path.path
 
+        if path.startswith('/api/v2/device/') and path.endswith('/revoke'):
+            device_id = path.split('/')[-2]
+            authenticated, auth_result = _v2_auth_device(self, device_id)
+            if not authenticated:
+                self.send_json_response(auth_result, 401)
+                return
+            with _V2_DB_LOCK, _v2_db_connect() as connection:
+                connection.execute("UPDATE devices SET revoked_at = ? WHERE device_id = ?", (datetime.now().isoformat(), device_id))
+            _v2_audit("api_key.revoked", device_id)
+            self.send_json_response({"status": "revoked", "device_id": device_id})
+            return
+
         if path in {'/api/v2/device/register', '/api/device/register'}:
             success, payload = _v2_register_device(data)
             if not success:
@@ -878,7 +1146,7 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             if not device_id:
                 self.send_json_response({"error": {"code": "missing_device_id", "message": "device_id is required."}}, 400)
                 return
-            code = _v2_create_enrollment_code(device_id, mac_address)
+            code = _v2_create_enrollment_code(device_id, mac_address, data.get("name"))
             self.send_json_response({
                 "status": "pending",
                 "device_id": device_id,
@@ -903,7 +1171,15 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             if not device:
                 self.send_json_response({"error": {"code": "device_not_found", "message": f"Device '{device_id}' has not registered."}}, 404)
                 return
+            persisted = _v2_load_device(device_id)
+            if persisted and persisted.get("api_key_hash"):
+                authenticated, auth_result = _v2_auth_device(self, device_id)
+                if not authenticated:
+                    self.send_json_response(auth_result, 401)
+                    return
             device['last_seen'] = datetime.now().isoformat()
+            with _V2_DB_LOCK, _v2_db_connect() as connection:
+                connection.execute("UPDATE devices SET last_seen = ? WHERE device_id = ?", (device['last_seen'], device_id))
             self.send_json_response({"accepted": True, "device_id": device_id, "profile": _V2_PROFILE_STATE.get("profile", "FIELD"), "screen": _V2_PROFILE_STATE.get("screen", "HOME")})
 
         elif path == '/api/v2/profile':
@@ -953,10 +1229,17 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
                 self.send_json_response(response)
                 return
 
+            device_id = data.get("device_id")
+            if device_id:
+                authenticated, auth_result = _v2_auth_device(self, device_id)
+                if not authenticated:
+                    self.send_json_response(auth_result, 401)
+                    return
             success, payload = _v2_handle_command(data)
             if not success:
                 self.send_json_response(payload, 400)
                 return
+            payload = _v2_create_command_job(data, payload, device_id)
             self.send_json_response(payload)
         
         elif path == '/api/command':

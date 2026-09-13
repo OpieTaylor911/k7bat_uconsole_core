@@ -185,6 +185,19 @@ Server response:
 
 The `api_key` should be stored locally on the Sidekick for subsequent authenticated calls against protected endpoints.
 
+The reference setup command in `app/sidekick_setup.py` performs the confirm request and writes `api_url`, `device_id`, `mac_address`, and `api_key` to the Sidekick config JSON. The uConsole Settings action displays the pair code; the Sidekick setup tool never needs to display or generate a second code.
+
+Example Sidekick setup command:
+
+```bash
+python3 sidekick_setup.py \\
+  --base-url http://uconsole:8080 \\
+  --device-id sidekick-001 \\
+  --mac-address AA:BB:CC:DD:EE:FF \\
+  --code 583165 \\
+  --config /etc/k7bat-sidekick/config.json
+```
+
 ### Legacy compatibility aliases kept during migration
 
 ```text
@@ -632,4 +645,244 @@ The fallback rules should be:
 4. If a source integration is stale, mark the data as stale rather than selling it as current.
 
 The goal is to keep the Sidekick useful even when local network or service connectivity is degraded.
+
+---
+
+## 15. Current implementation status
+
+The reference Python API now includes:
+
+- SQLite persistence at `~/.config/k7bat-uconsole-status/devices.sqlite3` by default.
+- Cryptographically random six-digit enrollment codes.
+- Five-minute enrollment expiry and single-use confirmation.
+- Hashed API-key storage. Raw keys are returned only from enrollment confirmation.
+- Bearer authentication for device-scoped reads, config, heartbeat, commands, and revocation.
+- Device listing, config, revoke, readiness, command-job, and audit storage primitives.
+
+The API key is sent by the Sidekick as:
+
+```http
+Authorization: Bearer k7bat_...
+X-Device-ID: sidekick-001
+```
+
+Do not send API keys in query strings, screen data, WebSocket event payloads, logs, or telemetry.
+
+### Device management routes
+
+```text
+GET  /api/v2/ready
+GET  /api/v2/devices
+GET  /api/v2/device/{device_id}
+GET  /api/v2/device/{device_id}/config
+POST /api/v2/device/{device_id}/revoke
+GET  /api/v2/command/{command_id}
+```
+
+The current command implementation remains intentionally conservative: it records a command job and returns a command ID. A future worker can transition jobs from `queued` to `running` to `completed` without changing the Sidekick protocol.
+
+---
+
+## 16. LVGL and PlatformIO implementation guide
+
+This section is the implementation contract for a Sidekick built with ESP32, LVGL, and PlatformIO. Keep transport, persisted credentials, and UI state as separate modules.
+
+### Recommended PlatformIO layout
+
+```text
+sidekick/
+  platformio.ini
+  include/
+    app_config.h
+  src/
+    main.cpp
+    api_client.cpp
+    api_client.h
+    credential_store.cpp
+    credential_store.h
+    pairing_screen.cpp
+    pairing_screen.h
+    dashboard_screen.cpp
+    dashboard_screen.h
+    telemetry_model.cpp
+    telemetry_model.h
+```
+
+Suggested `platformio.ini` baseline:
+
+```ini
+[env:sidekick]
+platform = espressif32
+board = esp32-s3-devkitc-1
+framework = arduino
+monitor_speed = 115200
+lib_deps =
+  lvgl/lvgl@^9.2.0
+  bblanchon/ArduinoJson@^7.0.4
+  https://github.com/adafruit/Adafruit_TinyUSB_Arduino.git
+build_flags =
+  -D LV_CONF_INCLUDE_SIMPLE
+  -D LV_LVGL_H_INCLUDE_SIMPLE
+```
+
+Use the actual Sidekick board definition and display/touch libraries for the selected hardware. The API client should not depend on LVGL; this keeps networking testable without a display.
+
+### Persistent credential storage
+
+Store the following in NVS/Preferences or a protected LittleFS file:
+
+```json
+{
+  "api_url": "http://uconsole:8080",
+  "device_id": "sidekick-001",
+  "mac_address": "AA:BB:CC:DD:EE:FF",
+  "api_key": "k7bat_..."
+}
+```
+
+Recommended Arduino storage wrapper:
+
+```cpp
+Preferences preferences;
+
+bool loadCredentials(Credentials& credentials) {
+  preferences.begin("k7bat", true);
+  credentials.apiUrl = preferences.getString("api_url", "");
+  credentials.deviceId = preferences.getString("device_id", "");
+  credentials.apiKey = preferences.getString("api_key", "");
+  preferences.end();
+  return credentials.apiUrl.length() > 0 && credentials.deviceId.length() > 0 && credentials.apiKey.length() > 0;
+}
+
+void saveCredentials(const Credentials& credentials) {
+  preferences.begin("k7bat", false);
+  preferences.putString("api_url", credentials.apiUrl);
+  preferences.putString("device_id", credentials.deviceId);
+  preferences.putString("api_key", credentials.apiKey);
+  preferences.end();
+}
+```
+
+Never render the full API key on the LVGL display after pairing. Show only `Paired` and the last four characters if a diagnostic screen needs confirmation.
+
+### Pairing state machine
+
+```text
+BOOT
+  |-- credentials present --> REGISTER --> SNAPSHOT --> DASHBOARD
+  |
+  `-- credentials absent ---> PAIRING_SCREEN
+                                |
+                                `-- user enters code from uConsole
+                                      |
+                                      `-- CONFIRM --> SAVE_KEY --> REGISTER
+```
+
+The Sidekick setup tool or an on-device LVGL pairing screen submits:
+
+```http
+POST /api/v2/device/enroll/confirm
+Content-Type: application/json
+```
+
+```json
+{
+  "device_id": "sidekick-001",
+  "mac_address": "AA:BB:CC:DD:EE:FF",
+  "code": "583165"
+}
+```
+
+On HTTP 200 with `status == "paired"`, save `api_key` immediately, then call register. On HTTP 400, show the structured error and let the user retry. Do not retry the code indefinitely; expire the local form after five minutes.
+
+### HTTP client behavior
+
+Every authenticated request should add:
+
+```cpp
+http.addHeader("Authorization", String("Bearer ") + credentials.apiKey);
+http.addHeader("X-Device-ID", credentials.deviceId);
+http.addHeader("Accept", "application/json");
+```
+
+Recommended request timeouts:
+
+```text
+pairing confirmation: 10 seconds
+register:             10 seconds
+status snapshot:       5 seconds
+heartbeat:             3 seconds
+command:               5 seconds
+```
+
+Treat these responses as state transitions:
+
+| HTTP | Meaning | LVGL behavior |
+| --- | --- | --- |
+| 200 | Success | Update model and screen |
+| 400 | Invalid request/code | Show recoverable error |
+| 401 | Key missing/invalid/revoked | Clear key and return to pairing |
+| 404 | Device/job not found | Refresh registration/state |
+| 429 | Rate limited | Back off and show delayed status |
+| 500/503 | uConsole unavailable | Keep cached screen and retry later |
+
+### LVGL screen responsibilities
+
+Keep screens thin. `api_client.cpp` owns HTTP and JSON; `telemetry_model.cpp` owns normalized values; LVGL callbacks only dispatch events and update widgets.
+
+Pairing screen controls:
+
+- device ID field, prefilled from firmware identity
+- read-only MAC address
+- six-digit code field
+- Pair button
+- connection/error label
+- timeout/reset action
+
+Dashboard controls:
+
+- connection indicator
+- profile and active screen
+- battery and temperature cards
+- GPS fix/satellite card
+- radio/network cards
+- last update age
+- command result banner
+
+Use a timer for refresh, not a blocking HTTP call inside an LVGL event callback:
+
+```cpp
+lv_timer_create([](lv_timer_t* timer) {
+  auto* client = static_cast<ApiClient*>(timer->user_data);
+  client->pollSnapshotInWorker();
+}, 5000, &apiClient);
+```
+
+Use a FreeRTOS task or the board's asynchronous HTTP facility for network calls. Marshal only compact result messages back to the LVGL thread.
+
+### Boot and fallback behavior
+
+1. Connect to Wi-Fi.
+2. If no credentials exist, show pairing screen.
+3. If credentials exist, call register and then `/api/v2/status`.
+4. Start a 30-second heartbeat timer.
+5. Poll status every 5 seconds until `/ws/v2` is implemented for the target deployment.
+6. On 401, erase only the API key and return to pairing.
+7. On timeout, keep the last good snapshot and mark telemetry stale.
+8. Never reboot repeatedly because the API is unavailable.
+
+### WebSocket migration path
+
+Start with REST polling. Add WebSocket only after the LVGL model handles snapshot and stale-state transitions correctly. The WebSocket task should feed the same `TelemetryModel` update functions used by REST; it must not update LVGL widgets directly.
+
+### PlatformIO test checklist
+
+Before connecting real hardware:
+
+1. Test `ApiClient` with a local HTTP fixture for 200, 400, 401, timeout, and malformed JSON.
+2. Verify credentials survive power loss and are not printed in serial logs.
+3. Verify a revoked key returns to the pairing screen.
+4. Verify stale telemetry is visibly marked after the polling timeout.
+5. Verify the LVGL UI remains responsive during network failure.
+6. Test the exact board display rotation, touch calibration, and heap usage.
 

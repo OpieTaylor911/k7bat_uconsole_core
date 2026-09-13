@@ -5,6 +5,7 @@ import json
 import threading
 import time
 import unittest
+import uuid
 
 import requests
 
@@ -140,6 +141,78 @@ class V2StatusApiTests(unittest.TestCase):
         self.assertEqual(confirm.status_code, 200)
         self.assertEqual(confirm.json().get("status"), "paired")
         self.assertTrue(confirm.json().get("api_key"))
+
+    def test_paired_device_requires_key_and_supports_config_and_revoke(self):
+        suffix = uuid.uuid4().hex[:8]
+        device_id = f"sidekick-auth-{suffix}"
+        mac_address = f"AA:BB:CC:DD:{suffix[:2]}:{suffix[2:4]}"
+        start = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/device/enroll/start",
+            json={"device_id": device_id, "name": "Auth Test", "mac_address": mac_address},
+            timeout=5,
+        )
+        self.assertEqual(start.status_code, 200)
+        confirm = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/device/enroll/confirm",
+            json={"device_id": device_id, "mac_address": mac_address, "code": start.json()["code"]},
+            timeout=5,
+        )
+        self.assertEqual(confirm.status_code, 200)
+        api_key = confirm.json()["api_key"]
+        headers = {"Authorization": f"Bearer {api_key}", "X-Device-ID": device_id}
+
+        unauthenticated = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/device/heartbeat",
+            json={"device_id": device_id},
+            timeout=5,
+        )
+        self.assertEqual(unauthenticated.status_code, 401)
+
+        heartbeat = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/device/heartbeat",
+            headers=headers,
+            json={"device_id": device_id},
+            timeout=5,
+        )
+        self.assertEqual(heartbeat.status_code, 200)
+
+        config = requests.get(
+            f"http://127.0.0.1:{self.port}/api/v2/device/{device_id}/config",
+            headers=headers,
+            timeout=5,
+        )
+        self.assertEqual(config.status_code, 200)
+        self.assertNotIn("api_key", config.json())
+
+        revoke = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/device/{device_id}/revoke",
+            headers=headers,
+            timeout=5,
+        )
+        self.assertEqual(revoke.status_code, 200)
+        revoked = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/device/heartbeat",
+            headers=headers,
+            json={"device_id": device_id},
+            timeout=5,
+        )
+        self.assertEqual(revoked.status_code, 401)
+
+    def test_readiness_and_command_job(self):
+        ready = requests.get(f"http://127.0.0.1:{self.port}/api/v2/ready", timeout=5)
+        self.assertEqual(ready.status_code, 200)
+        self.assertEqual(ready.json().get("status"), "ready")
+
+        command = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/command",
+            json={"target": "profile", "command": "switch", "value": "FIELD"},
+            timeout=5,
+        )
+        self.assertEqual(command.status_code, 200)
+        command_id = command.json()["command_id"]
+        job = requests.get(f"http://127.0.0.1:{self.port}/api/v2/command/{command_id}", timeout=5)
+        self.assertEqual(job.status_code, 200)
+        self.assertEqual(job.json().get("command_id"), command_id)
 
 
 if __name__ == "__main__":
