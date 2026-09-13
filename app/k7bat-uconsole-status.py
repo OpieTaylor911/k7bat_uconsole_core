@@ -30,6 +30,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     from widgets.cards import MetricCard, StatusCard, DeviceRow, SectionHeader, ActionButton
+
+    try:
+        from ac1200_diagnostics import AC1200Diagnostics
+    except ImportError:
+        AC1200Diagnostics = None
 except ImportError:
     # Fallback: define minimal classes if widgets not available
     class MetricCard(Gtk.Box):
@@ -58,7 +63,7 @@ except ImportError:
                 self.set_label(label)
 
 APP_NAME = "K7BAT uConsole Status App"
-APP_VERSION = "2.0.0"
+APP_VERSION = "1.2.1"
 REFRESH_SECONDS = 4
 SERVICE_PRIV_HINT = "Enable passwordless service control (sudoers) for bluetooth/readsb."
 DEFAULT_GITHUB_REPO = "OpieTaylor911/k7batuConsoleStatusApp"
@@ -2033,6 +2038,7 @@ class App(Gtk.Window):
         self.plugin_box.set_selection_mode(Gtk.SelectionMode.NONE)
         self.plugin_box.set_column_spacing(2)
         self.plugin_box.set_row_spacing(2)
+        self.ac1200_diag_box = self.create_ac1200_diagnostics_panel(right_controls)
         right_controls.pack_start(self.plugin_box, False, False, 0)
         self.refresh_plugin_buttons()
 
@@ -2048,6 +2054,87 @@ class App(Gtk.Window):
         self.refresh_gps_nav_button()
         self.refresh_async()
         GLib.timeout_add_seconds(7, self.check_for_new_release_once)
+
+    def create_ac1200_diagnostics_panel(self, parent):
+        """Show the HG AC1200 health summary in the launcher area."""
+        frame = Gtk.Frame()
+        frame.set_label_widget(self.make_icon_label("HG AC1200 Diagnostics", "wifi", 14))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        box.set_border_width(6)
+        frame.add(box)
+
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        summary = Gtk.Label(label="Checking...")
+        summary.set_xalign(0)
+        summary.set_hexpand(True)
+        refresh = Gtk.Button(label="Refresh")
+        refresh.set_tooltip_text("Run read-only Hacker Gadgets AC1200 checks")
+        refresh.connect("clicked", lambda _button: self.refresh_ac1200_diagnostics())
+        header.pack_start(summary, True, True, 0)
+        header.pack_end(refresh, False, False, 0)
+        box.pack_start(header, False, False, 0)
+
+        details = Gtk.Label(label="Loading USB, driver, RFKILL, firmware, and Wi-Fi capability checks...")
+        details.set_xalign(0)
+        details.set_line_wrap(True)
+        details.set_selectable(True)
+        box.pack_start(details, False, False, 0)
+        parent.pack_start(frame, False, False, 0)
+
+        self.ac1200_diag_summary = summary
+        self.ac1200_diag_details = details
+        GLib.idle_add(self.refresh_ac1200_diagnostics)
+        return frame
+
+    def refresh_ac1200_diagnostics(self):
+        if AC1200Diagnostics is None:
+            self.ac1200_diag_summary.set_text("Unavailable")
+            self.ac1200_diag_details.set_text("AC1200 diagnostics module is not installed.")
+            return False
+
+        self.ac1200_diag_summary.set_text("Checking...")
+        self.ac1200_diag_details.set_text("Reading HG AC1200 hardware and driver state...")
+
+        def worker():
+            try:
+                report = AC1200Diagnostics().run_basic()
+                GLib.idle_add(self.show_ac1200_diagnostics, report)
+            except Exception as exc:
+                GLib.idle_add(self.show_ac1200_diagnostics_error, str(exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+        return False
+
+    def show_ac1200_diagnostics(self, report):
+        summary = report.get("summary", {})
+        self.ac1200_diag_summary.set_text(
+            f"PASS {summary.get('pass', 0)}  WARN {summary.get('warn', 0)}  FAIL {summary.get('fail', 0)}"
+        )
+        lines = []
+        for check in report.get("checks", []):
+            status = check.get("status", "?")
+            details = check.get("details", {})
+            if status == "PASS":
+                marker = "OK"
+            elif status == "WARN":
+                marker = "WARN"
+            else:
+                marker = "FAIL"
+            detail_text = ""
+            if check.get("test") == "USB link speed":
+                detail_text = str(details.get("speed", "unknown"))
+            elif check.get("test") == "Supported bands":
+                detail_text = ", ".join(details.get("bands", [])) or "none"
+            elif check.get("test") == "RFKILL":
+                detail_text = ", ".join(details.get("targets", [])) or "not detected"
+            lines.append(f"[{marker}] {check.get('test', 'Check')}: {detail_text}".rstrip())
+        self.ac1200_diag_details.set_text("\n".join(lines) or "No diagnostic checks returned.")
+        return False
+
+    def show_ac1200_diagnostics_error(self, message):
+        self.ac1200_diag_summary.set_text("Error")
+        self.ac1200_diag_details.set_text(f"AC1200 diagnostic error: {message[:160]}")
+        return False
         GLib.timeout_add_seconds(REFRESH_SECONDS, self.refresh_async)
 
     def selected_gps_option(self):
@@ -3313,6 +3400,17 @@ class App(Gtk.Window):
         extra_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         extra_box.set_border_width(8)
 
+        # Pair Sidekick flow
+        device_pair_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        device_pair_label = Gtk.Label(label="Sidekick pairing")
+        device_pair_label.set_xalign(0)
+        device_pair_label.get_style_context().add_class("subtle")
+        device_pair_btn = Gtk.Button(label="Enroll Sidekick")
+        device_pair_btn.connect("clicked", self.on_enroll_sidekick_clicked)
+        device_pair_row.pack_start(device_pair_label, True, True, 0)
+        device_pair_row.pack_end(device_pair_btn, False, False, 0)
+        extra_box.pack_start(device_pair_row, False, False, 0)
+
         # Find GPS Apps button in settings
         find_gps_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         find_gps_label = Gtk.Label(label="GPS App Discovery")
@@ -3378,6 +3476,90 @@ class App(Gtk.Window):
                 self.status.set_text(f"Saved: GPS Nav set to {opt['label']}")
             self.refresh_plugin_buttons()
         dialog.destroy()
+
+        def on_enroll_sidekick_clicked(self, _button):
+            """Start a Sidekick enrollment flow against the uConsole API."""
+            api_url = self.settings.get("sidekick_api_url", "http://127.0.0.1:8080")
+            device_id = self.settings.get("sidekick_device_id") or "sidekick-uconsole-001"
+            mac_address = self.settings.get("sidekick_mac_address") or "AA:BB:CC:DD:EE:FF"
+
+            dialog = Gtk.Dialog(title="Enroll Sidekick", transient_for=self, flags=0)
+            dialog.add_buttons("Close", Gtk.ResponseType.CLOSE)
+            content = dialog.get_content_area()
+            content.set_spacing(10)
+            content.set_border_width(10)
+
+            fields = Gtk.Grid()
+            fields.set_column_spacing(8)
+            fields.set_row_spacing(6)
+
+            device_label = Gtk.Label(label="Device ID:")
+            device_label.set_xalign(0)
+            device_entry = Gtk.Entry()
+            device_entry.set_text(device_id)
+
+            mac_label = Gtk.Label(label="MAC address:")
+            mac_label.set_xalign(0)
+            mac_entry = Gtk.Entry()
+            mac_entry.set_text(mac_address)
+
+            code_label = Gtk.Label(label="Pairing code:")
+            code_label.set_xalign(0)
+            code_value = Gtk.Label(label="Waiting...")
+            code_value.set_xalign(0)
+            code_value.get_style_context().add_class("subtle")
+
+            fields.attach(device_label, 0, 0, 1, 1)
+            fields.attach(device_entry, 1, 0, 1, 1)
+            fields.attach(mac_label, 0, 1, 1, 1)
+            fields.attach(mac_entry, 1, 1, 1, 1)
+            fields.attach(code_label, 0, 2, 1, 1)
+            fields.attach(code_value, 1, 2, 1, 1)
+
+            content.pack_start(fields, False, False, 0)
+            content.pack_start(Gtk.Label(label="Use the generated code on the Sidekick to complete pairing."), False, False, 0)
+            dialog.show_all()
+
+            def start_enrollment(_widget):
+                device = device_entry.get_text().strip()
+                mac = mac_entry.get_text().strip()
+                if not device:
+                    self.status.set_text("Sidekick enrollment requires a device_id")
+                    return
+
+                payload = json.dumps({
+                    "device_id": device,
+                    "name": "K7BAT Sidekick",
+                    "mac_address": mac or "AA:BB:CC:DD:EE:FF",
+                    "board": "sidekick",
+                }).encode("utf-8")
+
+                req = urllib.request.Request(
+                    f"{api_url}/api/v2/device/enroll/start",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+                try:
+                    with urllib.request.urlopen(req, timeout=8) as resp:
+                        body = json.loads(resp.read().decode("utf-8", "replace"))
+                    code = str(body.get("code", "")).strip()
+                    self.settings["sidekick_device_id"] = device
+                    self.settings["sidekick_mac_address"] = mac or "AA:BB:CC:DD:EE:FF"
+                    self.settings["sidekick_api_url"] = api_url
+                    save_settings(self.settings)
+                    code_value.set_text(code if code else "No code returned")
+                    self.status.set_text(f"Sidekick pairing started. Code: {code}")
+                except Exception as exc:
+                    code_value.set_text("Request failed")
+                    self.status.set_text(f"Pairing failed: {exc}")
+
+            btn = Gtk.Button(label="Generate Code")
+            btn.connect("clicked", start_enrollment)
+            content.pack_end(btn, False, False, 0)
+            dialog.run()
+            dialog.destroy()
 
     def open_plugins_dialog(self, parent_dialog=None):
         dlg = Gtk.Dialog(title="Custom Plugin Launchers", transient_for=self, flags=0)
