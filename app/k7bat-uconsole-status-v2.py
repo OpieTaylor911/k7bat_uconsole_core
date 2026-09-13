@@ -1,5 +1,5 @@
 ﻿#!/usr/bin/env python3
-\"\"\"
+"""
 K7BAT uConsole Status App v2.0.0
 GTK3 dashboard with modernized UI using reusable widgets.
 
@@ -8,11 +8,11 @@ Features:
 - Reusable widget components (MetricCard, StatusCard, DeviceRow)
 - Sidebar navigation system
 - Dashboard layout redesign
-\"\"\"
+"""
 
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GLib, Gdk
+from gi.repository import Gtk, GLib, Gdk, Pango
 
 import sys
 import os
@@ -20,8 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from widgets.cards import MetricCard, StatusCard, DeviceRow, SectionHeader, ActionButton
 
-APP_NAME = \"K7BAT uConsole Status App\"
-APP_VERSION = \"2.0.0\"
+APP_NAME = "K7BAT uConsole Status App"
+APP_VERSION = "2.0.0"
 
 class ModernApp(Gtk.Window):
     def __init__(self):
@@ -53,7 +53,7 @@ class ModernApp(Gtk.Window):
         self.show_all()
     
     def load_theme(self):
-        \"\"\"Load the centralized GTK CSS theme.\"\"\"
+        """Load the centralized GTK CSS theme."""
         screen = Gdk.Screen.get_default()
         provider = Gtk.CssProvider()
         
@@ -68,14 +68,14 @@ class ModernApp(Gtk.Window):
                 print(f'Failed to load theme: {e}')
     
     def create_navigation(self):
-        \"\"\"Create sidebar navigation.\"\"\"
+        """Create sidebar navigation."""
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         sidebar.set_size_request(160, -1)
         sidebar.get_style_context().add_class('sidebar')
         
         # Logo/header
         logo = Gtk.Label(label='📊 K7BAT Status')
-        logo.modify_font(Gdk.Pango.FontDescription.from_string('bold 12pt'))
+        logo.modify_font(Pango.FontDescription.from_string('bold 12pt'))
         logo.set_margin_bottom(8)
         sidebar.pack_start(logo, False, False, 0)
         
@@ -99,22 +99,25 @@ class ModernApp(Gtk.Window):
         return sidebar
     
     def create_dashboard(self):
-        \"\"\"Create modern dashboard page.\"\"\"
+        """Create modern dashboard page."""
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         vbox.set_hexpand(True)
         vbox.set_vexpand(True)
-        vbox.set_margin_all(16)
+        vbox.set_margin_top(16)
+        vbox.set_margin_bottom(16)
+        vbox.set_margin_start(16)
+        vbox.set_margin_end(16)
         
         # Header
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         title = Gtk.Label(label='System Dashboard')
-        title.modify_font(Gdk.Pango.FontDescription.from_string('bold 14pt'))
+        title.modify_font(Pango.FontDescription.from_string('bold 14pt'))
         title.get_style_context().add_class('title')
         header.pack_start(title, True, True, 0)
         
-        timestamp = Gtk.Label(label=f'Updated: {__import__(\"datetime\").datetime.now().strftime(\"%H:%M:%S\")}')
+        timestamp = Gtk.Label(label=f'Updated: {__import__("datetime").datetime.now().strftime("%H:%M:%S")}')
         timestamp.set_margin_start(16)
-        timestamp.modify_font(Gdk.Pango.FontDescription.from_string('9pt'))
+        timestamp.modify_font(Pango.FontDescription.from_string('9pt'))
         timestamp.set_opacity(0.7)
         header.pack_end(timestamp, False, False, 0)
         

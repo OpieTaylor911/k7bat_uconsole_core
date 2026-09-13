@@ -1,70 +1,70 @@
 # Centralized GTK3 Theme for K7BAT Field Console
 
 /* Base colors - embedded console dark theme */
-@define-color bg-dark #0d1117;
-@define-color card-bg #161b22;
-@define-color border-color #30363d;
-@define-color text-normal #c9d1d9;
-@define-color text-primary #f0f6fc;
-@define-color accent-color #58a6ff;
-@define-color success-color #2ea043;
-@define-color warn-color #d29922;
-@define-color error-color #f85149;
+@define-color bg_dark #0d1117;
+@define-color card_bg #161b22;
+@define-color border_color #30363d;
+@define-color text_normal #c9d1d9;
+@define-color text_primary #f0f6fc;
+@define-color accent_color #58a6ff;
+@define-color success_color #2ea043;
+@define-color warn_color #d29922;
+@define-color error_color #f85149;
 
 /* Window styling */
 window {
-  background-color: @bg-dark;
-  color: @text-normal;
+  background-color: @bg_dark;
+  color: @text_normal;
 }
 
 /* Header bar - compact design */
 headerbar {
-  background-color: @card-bg;
-  border-bottom: 1px solid @border-color;
+  background-color: @card_bg;
+  border-bottom: 1px solid @border_color;
   padding: 6px 12px;
   min-height: 32px;
 }
 
 headerbar .title {
   font-weight: bold;
-  color: @text-primary;
+  color: @text_primary;
   font-size: 11pt;
 }
 
 headerbar .subtitle {
   font-size: 9pt;
-  color: @text-normal;
+  color: @text_normal;
   opacity: 0.8;
 }
 
 /* Sidebar navigation */
 sidebar {
   background-color: #0a0e14;
-  border-right: 1px solid @border-color;
+  border-right: 1px solid @border_color;
 }
 
 .sidebar-item {
   padding: 10px 16px;
   border-radius: 6px;
   margin: 2px 8px;
-  color: @text-normal;
+  color: @text_normal;
 }
 
 .sidebar-item:hover {
   background-color: rgba(88, 166, 255, 0.1);
-  color: @accent-color;
+  color: @accent_color;
 }
 
 .sidebar-item.active {
   background-color: rgba(88, 166, 255, 0.15);
-  color: @text-primary;
-  border-left: 3px solid @accent-color;
+  color: @text_primary;
+  border-left: 3px solid @accent_color;
 }
 
 /* Card widgets */
 .card {
-  background-color: @card-bg;
-  border: 1px solid @border-color;
+  background-color: @card_bg;
+  border: 1px solid @border_color;
   border-radius: 8px;
   padding: 12px;
   margin-bottom: 8px;
@@ -72,15 +72,15 @@ sidebar {
 
 .card-header {
   font-weight: bold;
-  color: @text-primary;
+  color: @text_primary;
   font-size: 10pt;
   margin-bottom: 8px;
 }
 
 /* Metric cards */
 .metric-card {
-  background-color: @card-bg;
-  border: 1px solid @border-color;
+  background-color: @card_bg;
+  border: 1px solid @border_color;
   border-radius: 8px;
   padding: 16px;
 }
@@ -88,20 +88,20 @@ sidebar {
 .metric-value {
   font-size: 24pt;
   font-weight: bold;
-  color: @text-primary;
+  color: @text_primary;
   font-family: monospace;
 }
 
 .metric-label {
   font-size: 9pt;
-  color: @text-normal;
+  color: @text_normal;
   margin-top: 4px;
 }
 
 /* Status cards */
 .status-card {
-  background-color: @card-bg;
-  border: 1px solid @border-color;
+  background-color: @card_bg;
+  border: 1px solid @border_color;
   border-radius: 8px;
   padding: 12px 16px;
   margin-bottom: 8px;
@@ -114,8 +114,8 @@ sidebar {
 
 /* Device rows */
 device-row {
-  background-color: @card-bg;
-  border: 1px solid @border-color;
+  background-color: @card_bg;
+  border: 1px solid @border_color;
   border-radius: 6px;
   padding: 10px 12px;
   margin-bottom: 4px;
@@ -123,31 +123,31 @@ device-row {
 
 .device-name {
   font-weight: bold;
-  color: @text-primary;
+  color: @text_primary;
   font-size: 9pt;
 }
 
 .device-value {
   font-family: monospace;
-  color: @text-normal;
+  color: @text_normal;
   font-size: 8pt;
 }
 
 /* Section headers */
 section-header {
   font-weight: bold;
-  color: @accent-color;
+  color: @accent_color;
   font-size: 10pt;
   margin: 16px 0 8px 0;
-  border-bottom: 1px solid @border-color;
+  border-bottom: 1px solid @border_color;
   padding-bottom: 4px;
 }
 
 /* Action buttons */
 actionbutton {
   background-color: rgba(88, 166, 255, 0.1);
-  color: @accent-color;
-  border: 1px solid @accent-color;
+  color: @accent_color;
+  border: 1px solid @accent_color;
   border-radius: 6px;
   padding: 8px 16px;
   font-weight: bold;
@@ -158,8 +158,8 @@ actionbutton:hover {
 }
 
 actionbutton:active {
-  background-color: @accent-color;
-  color: @bg-dark;
+  background-color: @accent_color;
+  color: @bg_dark;
 }
 
 /* Status dots */
@@ -170,15 +170,15 @@ actionbutton:active {
 }
 
 .status-dot.good {
-  background-color: @success-color;
+  background-color: @success_color;
 }
 
 .status-dot.warn {
-  background-color: @warn-color;
+  background-color: @warn_color;
 }
 
 .status-dot.bad {
-  background-color: @error-color;
+  background-color: @error_color;
 }
 
 .status-dot.muted {
@@ -187,8 +187,8 @@ actionbutton:active {
 
 /* Navigation stack */
 stack-switcher {
-  background-color: @card-bg;
-  border-bottom: 1px solid @border-color;
+  background-color: @card_bg;
+  border-bottom: 1px solid @border_color;
   padding: 4px;
 }
 
@@ -198,41 +198,41 @@ stack-switcher {
 
 /* Scrollbars */
 scrollbar slider {
-  background-color: @border-color;
+  background-color: @border_color;
   border-radius: 3px;
 }
 
 scrollbar trough {
-  background-color: @bg-dark;
+  background-color: @bg_dark;
 }
 
 /* Buttons */
 button {
   padding: 6px 12px;
   border-radius: 4px;
-  border: 1px solid @border-color;
-  background-color: @card-bg;
-  color: @text-normal;
+  border: 1px solid @border_color;
+  background-color: @card_bg;
+  color: @text_normal;
 }
 
 button.primary {
-  background-color: @accent-color;
-  color: @bg-dark;
+  background-color: @accent_color;
+  color: @bg_dark;
   font-weight: bold;
 }
 
 button.danger {
-  background-color: @error-color;
-  color: @bg-dark;
+  background-color: @error_color;
+  color: @bg_dark;
 }
 
 /* Labels */
 label {
-  color: @text-normal;
+  color: @text_normal;
 }
 
 label.title {
-  color: @text-primary;
+  color: @text_primary;
   font-weight: bold;
   font-size: 12pt;
 }
@@ -241,12 +241,12 @@ label.title {
 notebook tab {
   padding: 8px 16px;
   border-radius: 4px 4px 0 0;
-  background-color: @card-bg;
-  color: @text-normal;
+  background-color: @card_bg;
+  color: @text_normal;
 }
 
 notebook tab:checked {
-  background-color: @bg-dark;
-  color: @text-primary;
-  border-bottom: 2px solid @accent-color;
+  background-color: @bg_dark;
+  color: @text_primary;
+  border-bottom: 2px solid @accent_color;
 }
