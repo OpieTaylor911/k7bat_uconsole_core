@@ -199,7 +199,7 @@ Response:
 {
   "version": "2.0",
   "api_version": "2.0",
-  "status_app_version": "2.0.1",
+  "status_app_version": "2.0.4",
   "name": "K7BAT uConsole Status API"
 }
 ```

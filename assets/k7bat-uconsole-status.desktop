@@ -1,8 +1,8 @@
 [Desktop Entry]
-Version=2.0.3
+Version=2.0.4
 Type=Application
 Name=K7BAT uConsole Status App
-Comment=K7BAT Status App 2.0.3 for ClockworkPi uConsole
+Comment=K7BAT Status App 2.0.4 for ClockworkPi uConsole
 Exec=/usr/local/bin/k7bat-uconsole-status
 Icon=k7bat-uconsole-status
 Terminal=false

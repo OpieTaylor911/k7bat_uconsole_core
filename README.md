@@ -8,7 +8,7 @@ Field computer dashboard and Sidekick companion API for ClockworkPi uConsole sys
 
 ![Status App dashboard capture](assets/screenshots/status-dashboard.png)
 
-The current release is K7BAT Status App `v2.0.3`, tagged in Git as `v2.0.3`.
+The current release is K7BAT Status App `v2.0.4`, tagged in Git as `v2.0.4`.
 
 ## Features
 
@@ -86,7 +86,7 @@ On the uConsole:
 ```bash
 git clone https://github.com/OpieTaylor911/k7bat_uconsole_core.git
 cd k7bat_uconsole_core
-git checkout v2.0.3
+git checkout v2.0.4
 chmod +x install.sh scripts/*.sh
 sudo ./install.sh
 ```
@@ -144,7 +144,7 @@ Expected fields include:
 ```json
 {
 	"api_version": "2.0",
-	"status_app_version": "2.0.3"
+	"status_app_version": "2.0.4"
 }
 ```
 

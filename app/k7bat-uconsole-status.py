@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 K7BAT uConsole Status App
-Version 2.0.3
+Version 2.0.4
 
 GTK3 dashboard for ClockworkPi uConsole systems, especially Raspberry Pi CM4/CM5
 systems equipped with HackerGadgets AIO V2 and AC1200 hardware.
@@ -75,7 +75,7 @@ except ImportError:
                 self.set_label(label)
 
 APP_NAME = "K7BAT uConsole Status App"
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.4"
 REFRESH_SECONDS = 4
 SERVICE_PRIV_HINT = "Enable passwordless service control (sudoers) for bluetooth/readsb."
 DEFAULT_GITHUB_REPO = "OpieTaylor911/k7batuConsoleStatusApp"
