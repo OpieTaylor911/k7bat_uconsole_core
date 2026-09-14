@@ -1708,6 +1708,7 @@ class App(Gtk.Window):
         gps_cols = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         task_page = add_tab("TaskManager")
         api_page = add_tab("API Status")
+        self.api_status_page = api_page
         plugins_page = add_tab("Plugins")
         notebook.connect("switch-page", self.on_main_tab_changed)
 
@@ -1972,8 +1973,7 @@ class App(Gtk.Window):
         """Run the API contract check whenever the API Status tab is opened."""
         if page_num < 0:
             return
-        tab_label = _notebook.get_tab_label(_page)
-        if tab_label and tab_label.get_text() == "API Status":
+        if _page is self.api_status_page:
             self.run_api_status_checks()
 
     def run_api_status_checks(self):
@@ -1986,6 +1986,13 @@ class App(Gtk.Window):
         threading.Thread(target=self._api_status_worker, daemon=True).start()
 
     def _api_status_worker(self):
+        try:
+            self._api_status_worker_impl()
+        except Exception as exc:
+            logging.exception("API status checks failed")
+            GLib.idle_add(self._apply_api_status_results, [f"API check worker error: {exc}"], 0, 0)
+
+    def _api_status_worker_impl(self):
         base_url = self.settings.get("sidekick_api_url", "http://127.0.0.1:8080").rstrip("/")
         device_id = f"api-status-{os.getpid()}-{int(time.time())}"
         mac_address = "AA:BB:CC:DD:EE:70"
