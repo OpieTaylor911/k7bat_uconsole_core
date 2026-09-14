@@ -2048,8 +2048,13 @@ class App(Gtk.Window):
             }, {400}),
         ]
         lines = [f"API base: {base_url}", "", "METHOD  STATUS  EXPECTED  ENDPOINT", "------  ------  --------  --------"]
+        GLib.idle_add(self._append_api_status_line, lines[0])
+        GLib.idle_add(self._append_api_status_line, "")
+        GLib.idle_add(self._append_api_status_line, lines[2])
+        GLib.idle_add(self._append_api_status_line, lines[3])
         passed = 0
-        for method, path, payload, expected in checks:
+        total = len(checks)
+        for check_index, (method, path, payload, expected) in enumerate(checks, 1):
             try:
                 body = None
                 headers = {"Accept": "application/json"}
@@ -2072,10 +2077,20 @@ class App(Gtk.Window):
             if result == "PASS":
                 passed += 1
             expected_text = "/".join(str(code) for code in sorted(expected))
-            lines.append(f"{method:<7} {str(status_code):<7} {expected_text:<9} {path}  {result}")
+            line = f"{method:<7} {str(status_code):<7} {expected_text:<9} {path}  {result}"
+            lines.append(line)
+            GLib.idle_add(self._append_api_status_line, line)
+            GLib.idle_add(self.api_status_summary.set_text, f"Checking API endpoints… {check_index}/{total}")
 
-        total = len(checks)
         GLib.idle_add(self._apply_api_status_results, lines, passed, total)
+
+    def _append_api_status_line(self, line):
+        buffer = self.api_status_text.get_buffer()
+        end = buffer.get_end_iter()
+        buffer.insert(end, f"{line}\n")
+        mark = buffer.create_mark(None, buffer.get_end_iter(), False)
+        self.api_status_text.scroll_to_mark(mark, 0.0, True, 0.0, 1.0)
+        return False
 
     def _apply_api_status_results(self, lines, passed, total):
         self.api_status_text.get_buffer().set_text("\n".join(lines) + "\n")
