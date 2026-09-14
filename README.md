@@ -79,6 +79,173 @@ The uConsole remains authoritative. Sidekick devices display telemetry and issue
 
 Optional hardware and applications are detected dynamically. The dashboard remains usable when GPS, SDR, AIO, or secondary adapters are unavailable.
 
+## Installed system requirements
+
+The installer uses Debian `apt` and currently requests these packages when they are available:
+
+| Package | Purpose |
+| --- | --- |
+| `python3` | Runtime for the Status App, API, plugins, and tools |
+| `python3-gi` | Python GObject bindings |
+| `gir1.2-gtk-3.0` | GTK3 desktop interface |
+| `librtaudio7` | SDR++ audio compatibility |
+| `gpsd` | GPS daemon and serial GPS integration |
+| `gpsd-clients` | `cgps` and GPS troubleshooting tools |
+| `iproute2` | Network/interface inspection |
+| `iw` | Wi-Fi radio and interface inspection |
+| `ethtool` | Ethernet and wireless driver diagnostics |
+| `bluez` | Bluetooth service and controller management |
+| `procps` | Process, uptime, and TaskManager data |
+| `usbutils` | USB/AIO/AC1200 hardware inspection |
+| `desktop-file-utils` | Desktop launcher registration |
+| `libglib2.0-bin` | GLib desktop integration utilities |
+
+The installer continues with warnings when an optional package is unavailable instead of failing the entire application install.
+
+## Hardware integrations
+
+### ClockworkPi uConsole
+
+The primary target is a ClockworkPi uConsole running Debian on Raspberry Pi CM4 or CM5. The app supports Wayland/labwc and X11-capable environments.
+
+### HackerGadgets AIO V2
+
+When `aiov2_ctl` is available, the app can detect and control supported power rails and hardware states:
+
+- GPS
+- SDR
+- LoRa
+- USB/AC1200
+- Bluetooth dependency state
+
+Actions are delegated to the local `aiov2_ctl` command and remain disabled or marked unavailable when the hardware is absent.
+
+### AC1200 / MT7921U
+
+The AC1200 diagnostics integration checks USB presence, wireless interface state, controller information, driver data, and Bluetooth dependencies. The diagnostic implementation is in `app/ac1200_diagnostics.py` and is also installed as:
+
+```bash
+k7bat-ac1200-diagnostics --help
+```
+
+### GPS
+
+GPS data is collected through `gpsd`. Useful diagnostics:
+
+```bash
+cgps -s
+gpspipe -w
+systemctl status gpsd gpsd.socket
+```
+
+The installer preserves an existing gpsd device configuration and avoids changing it unless valid NMEA data is detected.
+
+## Services and background processes
+
+The app observes and can request restarts for common services:
+
+- `gpsd`
+- `gpsd.socket`
+- `bluetooth`
+- `readsb`
+- `NetworkManager`
+- the K7BAT Status API on port `8080`
+
+The TaskManager tab displays service state, uptime, load, memory, disk, and top processes. Service control uses non-interactive sudo and the installer creates a limited sudoers policy for `systemctl` when a desktop user is detected.
+
+Check service state manually:
+
+```bash
+systemctl status gpsd gpsd.socket bluetooth readsb NetworkManager
+pgrep -af 'status_api.py|k7bat-uconsole-status.py'
+ss -ltnp | grep ':8080'
+```
+
+## Optional tools and integrations
+
+The launcher system detects optional commands and disables buttons when dependencies are missing.
+
+Common optional packages:
+
+```bash
+sudo apt install navit wireshark kismet gqrx-sdr
+```
+
+Other supported or detected tools include:
+
+- SDR++
+- PyGPSClient
+- Pure Maps
+- Organic Maps
+- OSM Scout
+- Hak5 Pineapple modules
+- Wi-Fi assessment tools
+- Reaver/WPS tooling
+- packet/APRS/radio utilities supplied by the user
+
+The installer applies SDR++ compatibility fixes when `scripts/install-sdrpp-fixes.sh` is present. The SDRDecoder plugin can be installed separately from its external Git repository under the user plugin configuration directory.
+
+## Configuration and data locations
+
+| Path | Contents |
+| --- | --- |
+| `/home/bcaddy/uconsole-k7bat` | Canonical installed application tree |
+| `~/.config/k7bat-uconsole-status/settings.json` | App settings, profiles, alerts, theme, and launcher choices |
+| `~/.config/k7bat-uconsole-status/snapshots/` | Named profile/settings snapshots |
+| `~/.config/k7bat-uconsole-status/missions/` | Mission telemetry JSONL and summaries |
+| `~/.config/k7bat-uconsole-status/backups/` | Update/rollback metadata |
+| `~/.config/k7bat-uconsole-status/plugins.json` | User plugin launcher configuration |
+| `~/.config/k7bat-sidekick-setup/settings.json` | Saved Sidekick setup values; protected with mode `600` |
+| `~/.local/share/k7bat-uconsole-status/startup.log` | Status App startup and diagnostics log |
+| `~/.local/share/k7bat-sidekick-setup/launcher.log` | Sidekick setup launcher log |
+| `/home/bcaddy/uconsole-k7bat/.apikey` | Persistent Sidekick API key; never publish or log its contents |
+
+## Diagnostics and support bundle
+
+The repository includes diagnostics and troubleshooting helpers:
+
+```bash
+sudo ./scripts/diagnostics.sh
+./scripts/create-diagnostics-bundle.sh
+./scripts/sidekick_serial_diagnose.py
+./scripts/sidekick_acm_probe.py
+./scripts/monitor-sidekick-api.sh
+./scripts/verify-sidekick-api.sh
+```
+
+The Remote Assist plugin can create a support bundle from inside the Status App. Treat generated bundles as sensitive because they may contain network, service, hardware, and configuration information.
+
+## Plugin development
+
+Python plugins live in `app/plugins/` and are loaded by `plugin_manager.py`. User plugins can live under:
+
+```text
+/home/bcaddy/uconsole-k7bat/plugins/
+~/.config/k7bat-uconsole-status/plugins/
+```
+
+The plugin manifest is `app/plugins.json`; the installer also provides `assets/plugins.default.json` as a fallback starter set. Plugin import and loader checks are available under `scripts/tests/`.
+
+## API operation
+
+Start the canonical API manually:
+
+```bash
+python3 /home/bcaddy/uconsole-k7bat/status_api.py --host 0.0.0.0 --port 8080
+```
+
+Useful checks:
+
+```bash
+curl http://127.0.0.1:8080/api/v2/health
+curl http://127.0.0.1:8080/api/v2/ready
+curl http://127.0.0.1:8080/api/v2/version
+curl http://127.0.0.1:8080/api/v2/capabilities
+curl http://127.0.0.1:8080/api/v2/status
+```
+
+The API uses REST polling as its current reliable transport. The `/ws/v2` path is reserved for the future WebSocket event broker.
+
 ## Installation
 
 On the uConsole:
