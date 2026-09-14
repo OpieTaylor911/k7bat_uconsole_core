@@ -1925,6 +1925,9 @@ class App(Gtk.Window):
         self.last_update = Gtk.Label(label="Updated: --")
         self.last_update.get_style_context().add_class("subtle")
         status_bar.pack_end(self.last_update, False, False, 0)
+        self.app_version_label = Gtk.Label(label=f"K7BAT Status App v{APP_VERSION}")
+        self.app_version_label.get_style_context().add_class("subtle")
+        status_bar.pack_end(self.app_version_label, False, False, 8)
 
         self.refresh_profile_visibility()
         self.apply_gps_dependency_state(None)
