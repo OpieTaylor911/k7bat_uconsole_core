@@ -33,8 +33,10 @@ from pathlib import Path
 
 try:
     import serial
+    from serial.tools import list_ports
 except ImportError:
     serial = None
+    list_ports = None
 
 APP_DIR = Path(__file__).resolve().parent.parent
 
@@ -141,9 +143,16 @@ def find_esptool():
 
 
 def list_serial_ports():
-    """Return candidate serial device paths for the sidekick."""
-    ports = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
-    return ports
+    """Return USB serial candidates, preferring Espressif native USB devices."""
+    if list_ports is None:
+        return sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
+    devices = []
+    for port in list_ports.comports():
+        text = " ".join(filter(None, (port.description, port.manufacturer, port.product))).lower()
+        if port.device.startswith("/dev/ttyACM") or port.device.startswith("/dev/ttyUSB"):
+            priority = 0 if "espressif" in text or "jtag" in text else 1
+            devices.append((priority, port.device))
+    return [device for _priority, device in sorted(devices)]
 
 
 def get_local_ip():
@@ -355,6 +364,69 @@ class SidekickSetupWindow(Gtk.Window):
             self.port_combo.append_text(p)
         if ports:
             self.port_combo.set_active(0)
+
+    def _open_serial_port(self, port):
+        """Open one port exclusively and allow native USB firmware to reboot."""
+        options = {"baudrate": BAUD_RATE, "timeout": 0.25, "write_timeout": 2}
+        try:
+            return serial.Serial(port, exclusive=True, **options)
+        except TypeError:
+            return serial.Serial(port, **options)
+
+    def _query_port_with_retry(self, port):
+        """Return a firmware response after USB reset/re-enumeration retries."""
+        last_error = None
+        for attempt in range(1, 4):
+            ser = None
+            version = None
+            board = None
+            try:
+                self.log(f"--- Opening {port} attempt {attempt}/3 @ {BAUD_RATE} ---")
+                ser = self._open_serial_port(port)
+                self._ser = ser
+                time.sleep(2.5)
+                ser.reset_input_buffer()
+                ser.reset_output_buffer()
+                ser.write(b"GETVERSION\r\n")
+                ser.flush()
+                self.log(">>> GETVERSION\\r\\n")
+                version, board = self._read_version_response(ser, time.time() + 2.0)
+                if version or board:
+                    return ser, version, board
+                self.log("(no firmware version response)")
+            except (serial.SerialException, OSError) as exc:
+                last_error = exc
+                self.log(f"serial open/read error: {exc}")
+            finally:
+                if ser is not None and not (ser and (version or board)):
+                    try:
+                        ser.close()
+                    except Exception:
+                        pass
+                    self._ser = None
+            time.sleep(1.5)
+        if last_error:
+            raise last_error
+        return None, None, None
+
+    def _read_version_response(self, ser, deadline):
+        version = None
+        board = None
+        while time.time() < deadline:
+            raw = ser.readline()
+            if not raw:
+                continue
+            line = raw.decode(errors="replace").strip()
+            if not line:
+                continue
+            self.log(f"<<< {line}")
+            if line.startswith("VERSION="):
+                version = line.split("=", 1)[1]
+            elif line.startswith("BOARD="):
+                board = line.split("=", 1)[1]
+            if version and board:
+                break
+        return version, board
 
     def log(self, line):
         def append():
@@ -685,26 +757,24 @@ class SidekickSetupWindow(Gtk.Window):
     def _provision_worker(self, port, ssid, password, server_addr):
         try:
             self.set_status(f"Opening {port}…")
-            self.log(f"--- Opening {port} @ {BAUD_RATE} ---")
-            with serial.Serial(port, BAUD_RATE, timeout=1) as ser:
-                self._ser = ser
-                time.sleep(0.3)
+            ser, version, board = self._query_port_with_retry(port)
+            if ser is None:
+                GLib.idle_add(self.firmware_label.set_text, "Firmware: no response")
+                self.set_status("No firmware response. Check USB cable, firmware, and serial monitor ownership.")
+                return
 
-                version, board = self._query_firmware_version(ser)
-                if version:
-                    label = f"Firmware: v{version}" + (f" (board: {board})" if board else "")
-                    self.set_status(f"Sidekick firmware v{version} detected. Connecting…")
-                    GLib.idle_add(self.firmware_label.set_text, label)
-                    if board:
-                        GLib.idle_add(self._apply_detected_board, board)
-                else:
-                    self.log("(no firmware version response)")
-                    GLib.idle_add(self.firmware_label.set_text, "Firmware: unknown")
+            with ser:
+                label = f"Firmware: v{version or 'unknown'}" + (f" (board: {board})" if board else "")
+                self.set_status(f"Sidekick firmware v{version or 'unknown'} detected. Connecting…")
+                GLib.idle_add(self.firmware_label.set_text, label)
+                if board:
+                    GLib.idle_add(self._apply_detected_board, board)
 
                 ser.reset_input_buffer()
-                cmd = f"SETWIFI={ssid}|{password}\n"
+                cmd = f"SETWIFI={ssid}|{password}\r\n"
                 ser.write(cmd.encode())
-                self.log(f">>> SETWIFI={ssid}|***")
+                ser.flush()
+                self.log(">>> SETWIFI=***|***\\r\\n")
                 self.set_status(f"Requesting connection to '{ssid}'…")
 
                 ip = None
