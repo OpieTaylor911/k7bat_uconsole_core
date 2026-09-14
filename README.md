@@ -1,14 +1,14 @@
 # K7BAT uConsole Status App
 
-![K7BAT logo](k7batuConsoleStatusApp-2.0.3/small_k7bat.png)
+![K7BAT logo](assets/k7bat-logo.png)
 
 Field computer dashboard and Sidekick companion API for ClockworkPi uConsole systems. The Status App is designed for small-screen field operation: system health, GPS, network, radios, launchers, plugins, diagnostics, and Sidekick device provisioning are available from one GTK3 interface.
 
-![Status App screen](k7batuConsoleStatusApp-2.0.3/screen.png)
+![Status App screen](assets/screenshots/status-screen.png)
 
-![Status App dashboard capture](k7batuConsoleStatusApp-2.0.3/statusapp_1_2_0.png)
+![Status App dashboard capture](assets/screenshots/status-dashboard.png)
 
-The current release tree is [K7BAT Status App 2.0.3](k7batuConsoleStatusApp-2.0.3/), tagged in Git as `v2.0.3`.
+The current release is K7BAT Status App `v2.0.3`, tagged in Git as `v2.0.3`.
 
 ## Features
 
@@ -192,7 +192,8 @@ app/                         Core Status App, API, tests, and plugins
 app/api_v2_sidekickRW.md    Sidekick REST/LVGL/PlatformIO contract
 app/sidekick_device_test.py Sidekick API smoke test
 assets/                     Desktop launcher assets
-k7batuConsoleStatusApp-2.0.3/ Release tree, screenshots, docs, and setup tools
+docs/                        API, Sidekick, plugin, and release documentation
+assets/screenshots/         Status App screenshots
 install.sh                  Debian/uConsole installer
 k7bat-uconsole-status       Local launcher wrapper
 ```

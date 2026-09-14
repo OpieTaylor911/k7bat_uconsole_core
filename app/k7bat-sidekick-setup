@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Do not use `set -e` here: it would abort before we can log a failure's exit code.
+set -uo pipefail
+
+APP_PY="/home/bcaddy/uconsole-k7bat/app/plugins/sidekick_setup_ui.py"
+LOG_DIR="${HOME:-/home/bcaddy}/.local/share/k7bat-sidekick-setup"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/launcher.log"
+
+{
+  echo "=== launcher start $(date -Is) ==="
+  echo "APP_PY=$APP_PY"
+  echo "APP_PY exists: $([ -f "$APP_PY" ] && echo yes || echo NO)"
+  env | sort | grep -E '^(DISPLAY|WAYLAND_DISPLAY|XDG_|DBUS_|GDK_BACKEND|XAUTHORITY)=' || true
+} >> "$LOG_FILE" 2>&1
+
+if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+  export GDK_BACKEND=wayland
+elif [ -n "${DISPLAY:-}" ]; then
+  export GDK_BACKEND=x11
+fi
+
+/usr/bin/python3 "$APP_PY" "$@" >> "$LOG_FILE" 2>&1
+status=$?
+echo "=== launcher exit code=$status at $(date -Is) ===" >> "$LOG_FILE" 2>&1
+exit "$status"
