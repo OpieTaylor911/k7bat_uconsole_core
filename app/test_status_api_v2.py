@@ -191,6 +191,27 @@ class V2StatusApiTests(unittest.TestCase):
         self.assertEqual(events.status_code, 200)
         self.assertTrue(events.json().get("events"))
 
+    def test_groundcontrol_inspired_radio_gps_and_frequency_routes(self):
+        radio = requests.get(f"http://127.0.0.1:{self.port}/api/v2/radio", timeout=5)
+        self.assertEqual(radio.status_code, 200)
+        self.assertIn("radio", radio.json())
+
+        frequencies = requests.get(
+            f"http://127.0.0.1:{self.port}/api/v2/radio/frequencies?category=adsb", timeout=5
+        )
+        self.assertEqual(frequencies.status_code, 200)
+        self.assertTrue(frequencies.json().get("frequencies"))
+
+        location = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/gps/locations",
+            json={"name": "test-location", "latitude": 49.1, "longitude": -123.1},
+            timeout=5,
+        )
+        self.assertEqual(location.status_code, 200)
+        locations = requests.get(f"http://127.0.0.1:{self.port}/api/v2/gps/locations", timeout=5)
+        self.assertEqual(locations.status_code, 200)
+        self.assertTrue(any(item["name"] == "test-location" for item in locations.json()["locations"]))
+
 
 if __name__ == "__main__":
     unittest.main()

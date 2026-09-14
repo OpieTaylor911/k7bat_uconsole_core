@@ -690,6 +690,22 @@ GET /api/v2/meshtastic/messages
 GET /api/v2/firmware
 ```
 
+GroundControl-inspired uConsole resources:
+
+```text
+GET  /api/v2/radio
+GET  /api/v2/radio/frequencies
+GET  /api/v2/radio/frequencies?category=adsb
+GET  /api/v2/gps/locations
+POST /api/v2/gps/locations
+GET  /api/v2/gps/active-location
+POST /api/v2/gps/active-location
+```
+
+The radio response includes AIOv2 rail state, RTL-SDR presence, readsb, tar1090, and SDR service state when the local `RadioCoordinator` can observe them. Frequency references are offline metadata and do not imply that a decoder or radio is installed.
+
+Saved locations are validated for latitude/longitude range and remain owned by the uConsole. The Sidekick can display or select a location, but should not directly edit `/etc/default/readsb` or system service configuration.
+
 All JSON responses include a `request_id`. Domain data should include `updated_at` and `stale_after_seconds` so LVGL can mark old data without blocking the UI.
 
 Authenticated requests use:

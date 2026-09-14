@@ -106,6 +106,48 @@ _process_lock = threading.Lock()
 
 _V2_EVENT_SEQUENCE = 0
 _V2_COMMAND_JOBS = {}
+_LOCATION_DIR = Path.home() / ".config" / "k7bat-uconsole-status"
+_LOCATIONS_FILE = _LOCATION_DIR / "locations.tsv"
+_ACTIVE_LOCATION_FILE = _LOCATION_DIR / "active-location"
+
+_V2_FREQUENCY_REFERENCE = {
+    "adsb": [
+        {"mhz": 1090.0, "region": "worldwide", "use": "ADS-B / Mode S", "decoder": "readsb, viewadsb, rtl_adsb"},
+        {"mhz": 1030.0, "region": "worldwide", "use": "Mode S interrogation", "decoder": "not decoded here"},
+        {"mhz": 978.0, "region": "USA", "use": "UAT", "decoder": "dump978"},
+    ],
+    "acars": [
+        {"mhz": 131.550, "region": "worldwide", "use": "Primary ACARS", "decoder": "acarsdec"},
+        {"mhz": 130.025, "region": "USA/Canada", "use": "Secondary ACARS", "decoder": "acarsdec"},
+    ],
+    "vdl2": [
+        {"mhz": 136.975, "region": "worldwide", "use": "Common Signalling Channel", "decoder": "dumpvdl2"},
+        {"mhz": 136.650, "region": "North America", "use": "ARINC", "decoder": "dumpvdl2"},
+    ],
+}
+
+
+def _v2_locations():
+    locations = []
+    try:
+        for line in _LOCATIONS_FILE.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith("#"):
+                continue
+            name, latitude, longitude, source, timestamp = (line.split("\t") + ["", "", "", "", ""])[:5]
+            locations.append({"name": name, "latitude": float(latitude), "longitude": float(longitude), "source": source, "timestamp": timestamp})
+    except (OSError, ValueError):
+        pass
+    return locations
+
+
+def _v2_active_location():
+    try:
+        values = _ACTIVE_LOCATION_FILE.read_text(encoding="utf-8").strip().split("\t")
+        if len(values) >= 5:
+            return {"name": values[0], "latitude": float(values[1]), "longitude": float(values[2]), "source": values[3], "timestamp": values[4]}
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def _v2_request_id():
@@ -890,6 +932,24 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             self.send_json_response({"storage": storage, "updated_at": datetime.now().isoformat()})
             return
 
+        if path == '/api/v2/gps/locations':
+            self.send_json_response({"locations": _v2_locations(), "active": _v2_active_location()})
+            return
+
+        if path == '/api/v2/gps/active-location':
+            active = _v2_active_location()
+            self.send_json_response({"active": active, "state": "set" if active else "unset"})
+            return
+
+        if path == '/api/v2/radio/frequencies':
+            category = query_params.get("category", [None])[0]
+            if category and category not in _V2_FREQUENCY_REFERENCE:
+                self.send_json_response({"error": {"code": "not_found", "message": "Frequency category not found."}}, 404)
+                return
+            frequencies = _V2_FREQUENCY_REFERENCE.get(category, _V2_FREQUENCY_REFERENCE)
+            self.send_json_response({"categories": frequencies} if not category else {"category": category, "frequencies": frequencies})
+            return
+
         if path == '/api/v2/network/interfaces':
             self.send_json_response({"interfaces": _status_data.get("wifi", {}).get("interfaces", []), "updated_at": datetime.now().isoformat()})
             return
@@ -959,8 +1019,8 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             self.send_json_response({"meshtastic": {"state": "disconnected", "nodes": 0, "online": 0, "channel": "unknown"}})
 
         elif path == '/api/v2/radio':
-            radio = _status_data.get("radio", {})
-            self.send_json_response({"radio": {"state": radio.get("status", "idle"), "enabled": bool(radio.get("enabled", False)), "frequency": radio.get("frequency"), "mode": radio.get("mode") or ""}})
+            radio = get_radio_status()
+            self.send_json_response({"radio": radio})
 
         elif path == '/api/v2/security':
             self.send_json_response({"security": {"state": "ok", "firewall": "unknown", "wireless_security": "unknown"}})
@@ -1149,6 +1209,38 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             if device_id:
                 _V2_DEVICE_REGISTRY.setdefault(device_id, {"device_id": device_id})["last_telemetry"] = data
             self.send_json_response({"accepted": True, "device_id": device_id, "received_at": datetime.now().isoformat()})
+
+        elif path == '/api/v2/gps/locations':
+            if not all(key in data for key in ("name", "latitude", "longitude")):
+                self.send_json_response({"error": {"code": "invalid_payload", "message": "name, latitude, and longitude are required."}}, 400)
+                return
+            try:
+                latitude = float(data["latitude"])
+                longitude = float(data["longitude"])
+                if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+                    raise ValueError
+            except (TypeError, ValueError):
+                self.send_json_response({"error": {"code": "invalid_payload", "message": "latitude/longitude are out of range."}}, 400)
+                return
+            _LOCATION_DIR.mkdir(parents=True, exist_ok=True)
+            entry = {"name": str(data["name"]).replace("\t", "-")[:80], "latitude": latitude, "longitude": longitude, "source": data.get("source", "api"), "timestamp": datetime.now().isoformat()}
+            with _LOCATIONS_FILE.open("a", encoding="utf-8") as locations_file:
+                locations_file.write("\t".join(str(entry[key]) for key in ("name", "latitude", "longitude", "source", "timestamp")) + "\n")
+            self.send_json_response({"accepted": True, "location": entry})
+
+        elif path == '/api/v2/gps/active-location':
+            location = data.get("location") or data
+            if not all(key in location for key in ("name", "latitude", "longitude")):
+                self.send_json_response({"error": {"code": "invalid_payload", "message": "name, latitude, and longitude are required."}}, 400)
+                return
+            locations = _v2_locations()
+            selected = next((item for item in locations if item["name"] == location["name"]), None)
+            if not selected:
+                self.send_json_response({"error": {"code": "not_found", "message": "Saved location not found."}}, 404)
+                return
+            _LOCATION_DIR.mkdir(parents=True, exist_ok=True)
+            _ACTIVE_LOCATION_FILE.write_text("\t".join(str(selected[key]) for key in ("name", "latitude", "longitude", "source", "timestamp")) + "\n", encoding="utf-8")
+            self.send_json_response({"accepted": True, "active": selected})
 
         elif path == '/api/v2/profile':
             if not isinstance(data, dict):
