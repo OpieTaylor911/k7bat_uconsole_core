@@ -43,5 +43,13 @@
   "type": "python",
   "module": "reaver.reaver_ui.ReaverWindow",
   "tooltip": "Launch Reaver WPS attack tool with GUI interface (user plugin)"
+},
+{
+  "id": "sdrdecoder",
+  "label": "SDRDecoder Ground Station",
+  "check": "python3",
+  "type": "python",
+  "module": "sdrdecoder_plugin.SDRDecoderWindow",
+  "tooltip": "Launch the external SDRDecoder satellite ground-station web console"
 }
 ]
