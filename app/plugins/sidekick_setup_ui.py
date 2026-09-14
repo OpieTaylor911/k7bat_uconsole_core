@@ -366,12 +366,25 @@ class SidekickSetupWindow(Gtk.Window):
             self.port_combo.set_active(0)
 
     def _open_serial_port(self, port):
-        """Open one port exclusively and allow native USB firmware to reboot."""
-        options = {"baudrate": BAUD_RATE, "timeout": 0.25, "write_timeout": 2}
+        """Open native USB without toggling DTR/RTS and resetting the ESP32."""
+        options = {"baudrate": BAUD_RATE, "timeout": 0.25, "write_timeout": 5}
+        ser = serial.Serial(port=None, **options)
+        ser.port = port
+        # pyserial applies these states while opening the file descriptor. Set
+        # the internal values first so CDC-ACM does not receive a reset pulse.
+        ser._dtr_state = False
+        ser._rts_state = False
         try:
-            return serial.Serial(port, exclusive=True, **options)
+            ser.open()
         except TypeError:
-            return serial.Serial(port, **options)
+            ser.close()
+            ser = serial.Serial(port, **options)
+        try:
+            ser.dtr = False
+            ser.rts = False
+        except (OSError, serial.SerialException):
+            pass
+        return ser
 
     def _query_port_with_retry(self, port):
         """Return a firmware response after USB reset/re-enumeration retries."""
@@ -384,7 +397,7 @@ class SidekickSetupWindow(Gtk.Window):
                 self.log(f"--- Opening {port} attempt {attempt}/3 @ {BAUD_RATE} ---")
                 ser = self._open_serial_port(port)
                 self._ser = ser
-                time.sleep(2.5)
+                time.sleep(3.0)
                 ser.reset_input_buffer()
                 ser.reset_output_buffer()
                 ser.write(b"GETVERSION\r\n")
