@@ -1709,6 +1709,7 @@ class App(Gtk.Window):
         task_page = add_tab("TaskManager")
         api_page = add_tab("API Status")
         self.api_status_page = api_page
+        self.api_status_scroller = api_page.get_parent()
         plugins_page = add_tab("Plugins")
         notebook.connect("switch-page", self.on_main_tab_changed)
 
@@ -1973,7 +1974,7 @@ class App(Gtk.Window):
         """Run the API contract check whenever the API Status tab is opened."""
         if page_num < 0:
             return
-        if _page is self.api_status_page:
+        if _page is self.api_status_page or _page is self.api_status_scroller:
             self.run_api_status_checks()
 
     def run_api_status_checks(self):
@@ -3315,6 +3316,10 @@ class App(Gtk.Window):
 
     def _sidekick_api_status_tick(self):
         self.refresh_sidekick_api_status_label()
+        if self.sidekick_api_pid():
+            self.status.set_text("Sidekick API server: running")
+        elif self.status.get_text().startswith("Sidekick API server: starting"):
+            self.status.set_text("Sidekick API server: failed to start")
         return False
 
     def open_settings_dialog(self, _button):
