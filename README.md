@@ -279,6 +279,46 @@ Launch Sidekick Manager:
 k7bat-sidekick-setup
 ```
 
+### SideKickPC on Windows
+
+`SideKickPC` is a Windows workstation companion to the uConsole Sidekick Setup tool. It can:
+
+- connect to the uConsole v2 API
+- start enrollment and display the returned six-digit code
+- confirm enrollment and acquire an API key
+- discover Windows COM ports
+- probe ESP32 firmware with `GETVERSION\r\n`
+- push Wi-Fi credentials, API token, and uConsole server endpoint over serial
+- suppress DTR/RTS reset pulses where supported by pyserial
+- retry native ESP32-S3 USB re-enumeration
+
+Install and run it from PowerShell:
+
+```powershell
+cd Y:\uConsoleDev\k7bat_uconsole_v2_workspace
+python -m pip install -r scripts\sidekick_pc_requirements.txt
+python app\sidekick_pc.py
+```
+
+Or double-click/run:
+
+```text
+scripts\sidekick_pc.bat
+```
+
+Recommended flow:
+
+1. Set the API base URL to the uConsole address, for example `http://192.168.254.226:8080`.
+2. Enter a unique device ID and MAC address.
+3. Click **Start enrollment**.
+4. Enter the six-digit code displayed by the uConsole.
+5. Click **Confirm pair code**.
+6. Select the Sidekick COM port.
+7. Enter Wi-Fi credentials and the uConsole endpoint.
+8. Click **Probe firmware**, then **Push configuration**.
+
+Do not run PlatformIO Monitor, PuTTY, Arduino Serial Monitor, `screen`, or another serial tool on the same COM port while provisioning. Native ESP32-S3 USB devices may disconnect and re-enumerate during reset; SideKickPC waits, retries, and closes each port before retrying.
+
 Upgrade an existing installation by running the installer again:
 
 ```bash
