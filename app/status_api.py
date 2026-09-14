@@ -852,6 +852,19 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if path == '/api/v2/schema':
+            self.send_json_response({
+                "api_version": "2.0",
+                "resources": {
+                    "status": ["GET /api/v2/status"],
+                    "devices": ["POST /api/v2/device/register", "POST /api/v2/device/heartbeat"],
+                    "commands": ["POST /api/v2/command", "GET /api/v2/command/{command_id}"],
+                    "events": ["GET /api/v2/events?since={sequence}"],
+                    "enrollment": ["POST /api/v2/device/enroll/start", "POST /api/v2/device/enroll/confirm"],
+                },
+            })
+            return
+
         if path == '/api/v2/system/services':
             self.send_json_response({"services": _v2_system_services(), "updated_at": datetime.now().isoformat()})
             return
@@ -875,6 +888,33 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             except OSError:
                 storage = {"state": "unavailable"}
             self.send_json_response({"storage": storage, "updated_at": datetime.now().isoformat()})
+            return
+
+        if path == '/api/v2/network/interfaces':
+            self.send_json_response({"interfaces": _status_data.get("wifi", {}).get("interfaces", []), "updated_at": datetime.now().isoformat()})
+            return
+
+        if path == '/api/v2/gps/satellites':
+            gps = _normalize_v2_status_snapshot()["gps"]
+            self.send_json_response({"satellites": gps.get("satellites", 0), "state": gps.get("state"), "updated_at": gps.get("updated_at")})
+            return
+
+        if path == '/api/v2/gps/track':
+            gps = _normalize_v2_status_snapshot()["gps"]
+            self.send_json_response({"track": [], "last_position": gps, "state": "unavailable" if gps.get("latitude") is None else "active"})
+            return
+
+        if path == '/api/v2/adsb/aircraft':
+            self.send_json_response({"aircraft": [], "state": "unavailable", "updated_at": datetime.now().isoformat()})
+            return
+
+        if path in {'/api/v2/meshtastic/nodes', '/api/v2/meshtastic/messages'}:
+            key = "nodes" if path.endswith("nodes") else "messages"
+            self.send_json_response({key: [], "state": "unavailable", "updated_at": datetime.now().isoformat()})
+            return
+
+        if path == '/api/v2/sdr':
+            self.send_json_response({"state": "unavailable", "enabled": False, "frequency_hz": None, "mode": ""})
             return
 
         if path == '/api/v2/events':
@@ -949,6 +989,8 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             device_id = path.rsplit('/', 1)[-1]
             if path.endswith('/config'):
                 device_id = path.split('/')[-2]
+            if path.endswith('/firmware'):
+                device_id = path.split('/')[-2]
             device = _V2_DEVICE_REGISTRY.get(device_id)
             if not device:
                 self.send_json_response({"error": {"code": "device_not_found", "message": f"Device '{device_id}' has not registered."}}, 404)
@@ -962,6 +1004,13 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
                     "screen": _V2_PROFILE_STATE.get("screen", "HOME"),
                     "allowed_screens": list(_V2_ALLOWED_SCREENS),
                     "features": {"websocket": False, "commands": True, "ota": False},
+                })
+            elif path.endswith('/firmware'):
+                self.send_json_response({
+                    "device_id": device_id,
+                    "current_version": device.get("firmware", "unknown"),
+                    "available_version": device.get("firmware", "unknown"),
+                    "update_available": False,
                 })
             else:
                 self.send_json_response({"device": device})
