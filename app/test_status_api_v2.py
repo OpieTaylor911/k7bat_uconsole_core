@@ -212,6 +212,14 @@ class V2StatusApiTests(unittest.TestCase):
         self.assertEqual(locations.status_code, 200)
         self.assertTrue(any(item["name"] == "test-location" for item in locations.json()["locations"]))
 
+    def test_legacy_sidekick_plain_text_route(self):
+        response = requests.get(f"http://127.0.0.1:{self.port}/api/sidekick", timeout=5)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Content-Type", "").split(";", 1)[0], "text/plain")
+        self.assertIn("SDR=", response.text)
+        self.assertIn("GPS=", response.text)
+        self.assertTrue(response.text.endswith(";"))
+
 
 if __name__ == "__main__":
     unittest.main()

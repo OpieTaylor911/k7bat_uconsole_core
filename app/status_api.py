@@ -106,6 +106,9 @@ _process_lock = threading.Lock()
 
 _V2_EVENT_SEQUENCE = 0
 _V2_COMMAND_JOBS = {}
+_V2_SERVICES_CACHE = {}
+_V2_SERVICES_CACHE_AT = 0.0
+_V2_SERVICES_LOCK = threading.Lock()
 _LOCATION_DIR = Path.home() / ".config" / "k7bat-uconsole-status"
 _LOCATIONS_FILE = _LOCATION_DIR / "locations.tsv"
 _ACTIVE_LOCATION_FILE = _LOCATION_DIR / "active-location"
@@ -150,6 +153,39 @@ def _v2_active_location():
     return None
 
 
+def build_legacy_sidekick_line():
+    """Build the legacy plain-text payload expected by older Sidekick firmware."""
+    status = _normalize_v2_status_snapshot()
+    services = _v2_system_services()
+    radio = status.get("radio", {})
+    system = status.get("system", {})
+    gps = status.get("gps", {})
+    network = status.get("network", {})
+    gps_state = gps.get("state", "no_fix")
+    gps_code = "G" if gps_state in {"2d_fix", "3d_fix"} else "Y"
+    net_code = "G" if network.get("state") == "connected" else "R"
+    sdr_on = bool(radio.get("enabled"))
+    readsb_on = services.get("readsb") == "active"
+    bluetooth_on = services.get("bluetooth") == "active"
+    fields = {
+        "SDR": "G" if sdr_on else "X",
+        "GPS": gps_code,
+        "NET": net_code,
+        "ADSB": "G" if readsb_on else "X",
+        "GPSD": "G" if services.get("gpsd") == "active" else "X",
+        "READ": "G" if readsb_on else "X",
+        "TAR": "G" if services.get("tar1090") == "active" else "X",
+        "BT": "G" if bluetooth_on else "X",
+        "TEMP": "X",
+        "PWR": "G",
+        "ETH": "G" if network.get("interface", "").startswith("eth") else "X",
+        "INTERNET": net_code,
+        "BATPCT": system.get("battery_percent", ""),
+        "SYS": "OK",
+    }
+    return ";".join(f"{key}={value}" for key, value in fields.items()) + ";"
+
+
 def _v2_request_id():
     return f"req-{uuid.uuid4().hex}"
 
@@ -173,16 +209,26 @@ def _v2_add_freshness(value, updated_at=None, stale_after_seconds=10):
 
 
 def _v2_system_services():
+    global _V2_SERVICES_CACHE, _V2_SERVICES_CACHE_AT
+    now = time.monotonic()
+    with _V2_SERVICES_LOCK:
+        if now - _V2_SERVICES_CACHE_AT < 5:
+            return dict(_V2_SERVICES_CACHE)
+
     services = {}
     for name in ("gpsd", "gpsd.socket", "bluetooth", "readsb", "NetworkManager"):
         try:
             result = subprocess.run(
                 ["systemctl", "is-active", name],
-                capture_output=True, text=True, timeout=3, check=False,
+                capture_output=True, text=True, timeout=0.25, check=False,
             )
             services[name] = result.stdout.strip() or "unknown"
         except Exception:
             services[name] = "unavailable"
+
+    with _V2_SERVICES_LOCK:
+        _V2_SERVICES_CACHE = services
+        _V2_SERVICES_CACHE_AT = time.monotonic()
     return services
 
 
@@ -859,9 +905,6 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
         path = parsed_path.path
         query_params = parse_qs(parsed_path.query)
         
-        # Update status data on each request for fresh data
-        update_status_data()
-
         if path == '/api/v2/ready':
             self.send_json_response({
                 "status": "ready",
@@ -997,11 +1040,19 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
         
         if path == '/api/status' or path == '/':
             # Return full status
+            update_status_data()
             with _status_lock:
                 self.send_json_response(_status_data)
 
         elif path == '/api/v2/status':
             self.send_json_response(_normalize_v2_status_snapshot())
+
+        elif path == '/api/sidekick':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(build_legacy_sidekick_line().encode('utf-8'))
 
         elif path == '/api/v2/system':
             self.send_json_response({"system": _normalize_v2_system_status()})

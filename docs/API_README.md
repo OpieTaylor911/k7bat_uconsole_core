@@ -1,4 +1,6 @@
-# K7BAT uConsole Status API v1.1.0
+# K7BAT uConsole Status API
+
+This document covers the legacy `/api` compatibility routes. New Sidekick and PlatformIO firmware should use the versioned `/api/v2` contract documented in [app/api_v2_sidekickRW.md](../app/api_v2_sidekickRW.md).
 
 HTTP API for Arduino and other devices to query and post status information.
 
@@ -29,6 +31,7 @@ HTTP API for Arduino and other devices to query and post status information.
 | `/api/events` | Get pending Arduino events (button presses, etc.) |
 | `/api/health` | Health check |
 | `/api/version` | API version info |
+| `/api/sidekick` | Legacy plain-text Sidekick status line (`K=V;K=V;...`) |
 
 ### POST Endpoints
 
