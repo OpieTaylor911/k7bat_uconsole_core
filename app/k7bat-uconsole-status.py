@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 K7BAT uConsole Status App
-Version 1.0.1
+Version 2.0.3
 
 GTK3 dashboard for ClockworkPi uConsole systems, especially Raspberry Pi CM4/CM5
 systems equipped with HackerGadgets AIO V2 and AC1200 hardware.
@@ -14,27 +14,39 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, GLib, Gdk, GdkPixbuf, Pango
 
 import json
+import logging
 import os
 import sys
 import re
+import signal
 import shutil
 import subprocess
 import tarfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+LOG_DIR = Path.home() / ".local" / "share" / "k7bat-uconsole-status"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "startup.log"
+logging.basicConfig(
+    filename=str(LOG_FILE),
+    level=logging.DEBUG,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logging.info("=== app launch requested ===")
+logging.info("argv=%s", sys.argv)
+logging.info("cwd=%s", os.getcwd())
+logging.info("DISPLAY=%s WAYLAND_DISPLAY=%s", os.environ.get("DISPLAY"), os.environ.get("WAYLAND_DISPLAY"))
+logging.info("XDG_RUNTIME_DIR=%s DBUS_SESSION_BUS_ADDRESS=%s", os.environ.get("XDG_RUNTIME_DIR"), os.environ.get("DBUS_SESSION_BUS_ADDRESS"))
+
 # Import v2.0.0 UI components
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from widgets.cards import MetricCard, StatusCard, DeviceRow, SectionHeader, ActionButton
-
-    try:
-        from ac1200_diagnostics import AC1200Diagnostics
-    except ImportError:
-        AC1200Diagnostics = None
+    from widgets.cards import MetricCard, StatusCard, DeviceRow, SectionHeader, ActionButton, DashboardPage, SidebarNavigation
 except ImportError:
     # Fallback: define minimal classes if widgets not available
     class MetricCard(Gtk.Box):
@@ -63,7 +75,7 @@ except ImportError:
                 self.set_label(label)
 
 APP_NAME = "K7BAT uConsole Status App"
-APP_VERSION = "1.2.1"
+APP_VERSION = "2.0.3"
 REFRESH_SECONDS = 4
 SERVICE_PRIV_HINT = "Enable passwordless service control (sudoers) for bluetooth/readsb."
 DEFAULT_GITHUB_REPO = "OpieTaylor911/k7batuConsoleStatusApp"
@@ -177,6 +189,26 @@ GPS_NAV_OPTIONS = [
         ],
     },
     {"id": "pygpsclient", "label": "PyGPSClient", "commands": ["pygpsclient"]},
+]
+
+BUILTIN_LAUNCHERS = [
+    {"name": "Pure Maps", "icon": "network", "commands": [
+        "pure-maps", "puremaps",
+        "flatpak:app.puremaps.PureMaps", "flatpak:io.github.rinigus.PureMaps",
+    ]},
+    {"name": "Organic Maps", "icon": "network", "commands": [
+        "organicmaps", "omaps", "OMaps",
+        "flatpak:app.organicmaps.desktop", "flatpak:com.organicmaps.desktop",
+    ]},
+    {"name": "PyGPS", "icon": "satellite", "commands": ["pygpsclient"]},
+    {"name": "OSM Scout", "icon": "network", "commands": [
+        "flatpak:io.github.rinigus.OSMScoutServer", "flatpak:io.github.rinigus.osmscout_server",
+    ]},
+    {"name": "SDR++", "icon": None, "commands": ["sdrpp", "sdrplusplus", "flatpak:org.sdrpp.sdrpp"]},
+    {"name": "GQRX", "icon": None, "commands": ["gqrx"]},
+    {"name": "ADS-B", "icon": "radar", "commands": []},
+    {"name": "Wireshark", "icon": "network", "commands": ["wireshark"]},
+    {"name": "Kismet", "icon": "wifi", "commands": ["kismet"]},
 ]
 
 def run(cmd, timeout=2):
@@ -1532,6 +1564,7 @@ class App(Gtk.Window):
         self.connect("destroy", Gtk.main_quit)
         self.connect("key-press-event", self.on_key_press)
         self.labels = {}
+        self.last_refresh_time = 0
         self.radio_dots = {}
         self.radio_text = {}
         self.radio_switches = {}
@@ -1580,8 +1613,8 @@ class App(Gtk.Window):
         self.touch_mode_enabled = self.settings.get("touch_mode_enabled", False)
         self.high_contrast_enabled = self.settings.get("high_contrast_enabled", False)
 
-        # Load v2.0.0 centralized theme if available
-        theme_path = APP_DIR / "styles" / "theme.css"
+        # Load v2.0.0 centralized theme with fallback
+        theme_path = APP_DIR / "theme.css"
         if theme_path.exists():
             provider = Gtk.CssProvider()
             try:
@@ -1610,532 +1643,448 @@ class App(Gtk.Window):
         # Apply UI mode settings from loaded state
         self.apply_ui_mode_settings()
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        outer.set_border_width(4)
-        self.add(outer)
+        # ---- Root layout ----
+        root_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.add(root_box)
 
-        layout = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        outer.pack_start(layout, True, True, 0)
+        # ---- Header bar ----
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        header.set_border_width(8)
+        root_box.pack_start(header, False, False, 0)
 
-        main_scroll = Gtk.ScrolledWindow()
-        main_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        main_scroll.set_hexpand(True)
-        main_scroll.set_vexpand(True)
-        layout.pack_start(main_scroll, True, True, 0)
+        title_label = Gtk.Label(label=APP_NAME)
+        title_label.get_style_context().add_class("title")
+        title_label.set_xalign(0)
+        header.pack_start(title_label, False, False, 0)
 
-        main_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        main_scroll.add(main_col)
+        self.alert_summary = Gtk.Label(label="Alerts: checking…")
+        self.alert_summary.set_xalign(0)
+        self.alert_summary.set_line_wrap(True)
+        self.alert_summary.get_style_context().add_class("subtle")
+        header.pack_start(self.alert_summary, True, True, 12)
 
-        right_controls = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        right_controls.set_size_request(300, -1)
-        layout.pack_start(right_controls, False, False, 0)
-
-        top_band = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        main_col.pack_start(top_band, False, False, 0)
-
-        top_left_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        top_band.pack_start(top_left_col, True, True, 0)
-
-        tactical_col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        tactical_col.set_size_request(230, -1)
-        tactical_col.set_valign(Gtk.Align.START)
-        top_band.pack_start(tactical_col, False, False, 0)
-
-        logo_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        right_controls.pack_start(logo_row, False, False, 0)
-
-        logo_candidates = [
-            Path(__file__).resolve().parent / "k7bat-callsign-logo.png",
-            Path(__file__).resolve().parent / "k7bat-callsign-logo.svg",
-        ]
-        for logo_path in logo_candidates:
-            if not logo_path.exists():
-                continue
-            try:
-                pix = GdkPixbuf.Pixbuf.new_from_file_at_scale(
-                    str(logo_path),
-                    width=190,
-                    height=52,
-                    preserve_aspect_ratio=True,
-                )
-                logo = Gtk.Image.new_from_pixbuf(pix)
-                logo_row.pack_start(logo, False, False, 0)
-                break
-            except Exception:
-                continue
+        # Status chips share the header row with Alerts to save vertical space
+        for key in ("chip_fix", "chip_wifi", "chip_gpsd", "chip_readsb"):
+            chip = Gtk.Label(label="—")
+            chip.get_style_context().add_class("chip")
+            chip.get_style_context().add_class("chip-muted")
+            self.chips[key] = chip
+            header.pack_start(chip, False, False, 0)
 
         settings_btn = Gtk.Button(label="Settings")
         self.decorate_button(settings_btn, "settings", "Settings")
         settings_btn.connect("clicked", self.open_settings_dialog)
-        logo_row.pack_start(settings_btn, False, False, 0)
+        header.pack_start(settings_btn, False, False, 0)
+
+        minimize_btn = Gtk.Button(label="Minimize")
+        self.decorate_button(minimize_btn, "minimize", "Minimize")
+        minimize_btn.connect("clicked", lambda _b: self.iconify())
+        header.pack_start(minimize_btn, False, False, 0)
 
         exit_btn = Gtk.Button(label="Exit")
         self.decorate_button(exit_btn, "power", "Exit")
         exit_btn.connect("clicked", lambda _b: Gtk.main_quit())
-        logo_row.pack_start(exit_btn, False, False, 0)
+        header.pack_start(exit_btn, False, False, 0)
 
-        _, version_row = self.make_icon_info_row(right_controls, f"v{APP_VERSION} • K7BAT", "dashboard", 14)
-        version_row.get_style_context().add_class("subtle")
 
-        # Auto-update row with status and buttons
-        update_header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        right_controls.pack_start(update_header_row, False, False, 0)
-        self.last_update, update_row = self.make_icon_info_row(right_controls, "Updated: --", "dashboard", 14)
-        update_row.get_style_context().add_class("subtle")
+        # ---- Tabbed content (small-screen friendly) ----
+        notebook = Gtk.Notebook()
+        notebook.set_vexpand(True)
+        notebook.set_scrollable(True)
+        root_box.pack_start(notebook, True, True, 0)
 
-        # Add update controls below status
-        _, update_status_row = self.make_icon_info_row(right_controls, "Update: ready", "download", 12)
-        update_status_row.get_style_context().add_class("subtle")
-        self.update_status_label = update_status_row
+        def add_tab(label_text):
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            page.set_border_width(6)
+            scroller.add(page)
+            notebook.append_page(scroller, Gtk.Label(label=label_text))
+            return page
 
-        profile_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        right_controls.pack_start(profile_row, False, False, 0)
-        profile_row.pack_start(self.make_icon_label("Profile:", "power", 14), False, False, 0)
-        self.profile_combo = Gtk.ComboBoxText()
-        self.profile_combo.append("custom", "Custom")
-        for pid, preset in PROFILE_PRESETS.items():
-            self.profile_combo.append(pid, preset["label"])
-        self.profile_combo.set_active_id(self.settings.get("profile", "custom"))
-        self.profile_combo.set_size_request(140, -1)
-        self.profile_combo.connect("changed", self.on_profile_changed)
-        profile_row.pack_start(self.profile_combo, True, True, 0)
+        status_page = add_tab("Status")
+        network_page = add_tab("Network")
+        gps_page = add_tab("GPS")
+        gps_cols = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        task_page = add_tab("TaskManager")
+        api_page = add_tab("API Status")
+        plugins_page = add_tab("Plugins")
+        notebook.connect("switch-page", self.on_main_tab_changed)
 
-        snapshot_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        right_controls.pack_start(snapshot_row, False, False, 0)
+        status_cols = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        status_page.pack_start(status_cols, False, False, 0)
+        status_col_left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        status_col_right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        status_cols.pack_start(status_col_left, True, True, 0)
+        status_cols.pack_start(status_col_right, True, True, 0)
 
-        export_btn = Gtk.Button(label="Export")
-        self.decorate_button(export_btn, "dashboard", "Export")
-        export_btn.connect("clicked", self.on_export_profile)
-        snapshot_row.pack_start(export_btn, True, True, 0)
+        # System section
+        sysbox = self.make_frame(status_col_left, "System", "dashboard")
+        self.add_row(sysbox, "cpu", "CPU Temp", "cpu")
+        self.add_row(sysbox, "ram", "RAM", "cpu")
+        self.add_row(sysbox, "disk", "Disk", "dashboard")
+        self.add_row(sysbox, "battery", "Battery", "battery")
 
-        import_btn = Gtk.Button(label="Import")
-        self.decorate_button(import_btn, "terminal", "Import")
-        import_btn.connect("clicked", self.on_import_profile)
-        snapshot_row.pack_start(import_btn, True, True, 0)
-
-        snapshots_btn = Gtk.Button(label="Snapshots")
-        self.decorate_button(snapshots_btn, "dashboard", "Snapshots")
-        snapshots_btn.connect("clicked", self.open_snapshots_dialog)
-        snapshot_row.pack_start(snapshots_btn, True, True, 0)
-
-        mission_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        right_controls.pack_start(mission_row, False, False, 0)
-        self.mission_start_btn = Gtk.Button(label="Record")
-        self.decorate_button(self.mission_start_btn, "radar", "Record")
-        self.mission_start_btn.connect("clicked", self.on_start_mission)
-        mission_row.pack_start(self.mission_start_btn, True, True, 0)
-
-        self.mission_stop_btn = Gtk.Button(label="Stop")
-        self.decorate_button(self.mission_stop_btn, "power", "Stop")
-        self.mission_stop_btn.connect("clicked", self.on_stop_mission)
-        self.mission_stop_btn.set_sensitive(False)
-        mission_row.pack_start(self.mission_stop_btn, True, True, 0)
-
-        self.mission_status, mission_status_row = self.make_icon_info_row(
-            right_controls,
-            "Mission: idle",
-            "dashboard",
-            14,
-        )
-        mission_status_row.get_style_context().add_class("subtle")
-
-        hotkeys_label, hotkeys_row = self.make_icon_info_row(
-            right_controls,
-            "Hotkeys: Alt+1/2/3 presets • Alt+0 custom",
-            "terminal",
-            14,
-            wrap=True,
-        )
-        hotkeys_row.get_style_context().add_class("subtle")
-
-        service_header_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        right_controls.pack_start(service_header_row, False, False, 0)
-        service_header_row.pack_start(self.make_icon_label("Svc:", "network", 14), False, False, 0)
-
-        for svc in ("gpsd", "bluetooth", "readsb"):
-            group = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+        # Power & Radios section (GPS/SDR/LORA/USB-AC1200 + Bluetooth)
+        radiobox = self.make_frame(status_col_left, "Power & Radios", "power")
+        for dev in ("GPS", "SDR", "LORA", "USB"):
+            row = Gtk.Box(spacing=6)
             dot = Gtk.Label(label="●")
-            stat = Gtk.Label(label=svc)
-            stat.set_xalign(0)
-            stat.set_ellipsize(Pango.EllipsizeMode.END)
-            stat.set_single_line_mode(True)
-            stat.get_style_context().add_class("subtle")
+            dot.get_style_context().add_class("status-unknown")
+            self.radio_dots[dev] = dot
+            row.pack_start(dot, False, False, 0)
+            text = Gtk.Label(label=self.radio_display_name(dev))
+            text.set_xalign(0)
+            self.radio_text[dev] = text
+            row.pack_start(text, True, True, 0)
+            sw = Gtk.Switch()
+            sw.connect("notify::active", self.on_radio_switch_toggled, dev)
+            self.radio_switches[dev] = sw
+            row.pack_start(sw, False, False, 0)
+            radiobox.pack_start(row, False, False, 0)
+
+        bt_row = Gtk.Box(spacing=6)
+        self.bt_toggle_dot = Gtk.Label(label="●")
+        self.bt_toggle_dot.get_style_context().add_class("status-unknown")
+        bt_row.pack_start(self.bt_toggle_dot, False, False, 0)
+        self.bt_toggle_label = Gtk.Label(label="Bluetooth")
+        self.bt_toggle_label.set_xalign(0)
+        bt_row.pack_start(self.bt_toggle_label, True, True, 0)
+        self.bt_switch = Gtk.Switch()
+        self.bt_switch.connect("notify::active", self.on_bluetooth_switch_toggled)
+        bt_row.pack_start(self.bt_switch, False, False, 0)
+        self.bt_toggle_group = bt_row
+        radiobox.pack_start(bt_row, False, False, 0)
+
+        # GPS section moved to its own tab (see gps_page below)
+
+        # Services section: full width, spans both columns, laid out 2-wide
+        svcbox = self.make_frame(status_page, "Services", "settings")
+        self.add_row(svcbox, "gpsd", "gpsd")
+        self.add_row(svcbox, "readsb", "readsb")
+        svc_grid = Gtk.Grid(row_spacing=4, column_spacing=16)
+        svc_grid.set_column_homogeneous(True)
+        svcbox.pack_start(svc_grid, False, False, 0)
+        service_positions = (
+            ("gpsd", 0, 0),
+            ("bluetooth", 0, 1),
+            ("readsb", 1, 1),
+            ("NetworkManager", 0, 2),
+            ("gpsd.socket", 1, 2),
+        )
+        for svc, column, row_index in service_positions:
+            row = Gtk.Box(spacing=6)
+            dot = Gtk.Label(label="●")
+            dot.get_style_context().add_class("status-unknown")
             self.service_dots[svc] = dot
-            self.service_labels[svc] = stat
-            group.pack_start(dot, False, False, 0)
-            group.pack_start(stat, False, False, 0)
-            service_header_row.pack_start(group, False, False, 0)
+            self.service_labels[svc] = svc
+            row.pack_start(dot, False, False, 0)
+            name_lbl = Gtk.Label(label=svc)
+            name_lbl.set_xalign(0)
+            row.pack_start(name_lbl, True, True, 0)
+            restart_btn = Gtk.Button(label="Restart")
+            restart_btn.connect("clicked", lambda _b, s=svc: self.restart_service(s))
+            row.pack_start(restart_btn, False, False, 0)
+            svc_grid.attach(row, column, row_index, 1, 1)
 
-        self.restart_combo = Gtk.ComboBoxText()
-        for svc in ("gpsd", "gpsd.socket", "bluetooth", "readsb", "NetworkManager"):
-            self.restart_combo.append_text(svc)
-        self.restart_combo.set_active(0)
-        self.restart_combo.set_size_request(100, -1)
-        restart_btn = Gtk.Button(label="Restart")
-        self.decorate_button(restart_btn, "power", "Restart")
-        restart_btn.connect("clicked", self.on_restart_selected)
+        sidekick_api_row = Gtk.Box(spacing=6)
+        self.sidekick_api_main_label = Gtk.Label(label=self.sidekick_api_main_status_text())
+        self.sidekick_api_main_label.set_xalign(0)
+        sidekick_api_row.pack_start(self.sidekick_api_main_label, True, True, 0)
+        start_api_btn = Gtk.Button(label="Start")
+        start_api_btn.connect("clicked", self.on_start_sidekick_api_clicked)
+        sidekick_api_row.pack_start(start_api_btn, False, False, 0)
+        stop_api_btn = Gtk.Button(label="Stop")
+        stop_api_btn.connect("clicked", self.on_stop_sidekick_api_clicked)
+        sidekick_api_row.pack_start(stop_api_btn, False, False, 0)
+        restart_api_btn = Gtk.Button(label="Restart")
+        restart_api_btn.connect("clicked", self.on_restart_sidekick_api_clicked)
+        sidekick_api_row.pack_start(restart_api_btn, False, False, 0)
+        svc_grid.attach(sidekick_api_row, 1, 0, 1, 1)
 
-        service_action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        service_action_row.pack_start(self.restart_combo, True, True, 0)
-        service_action_row.pack_start(restart_btn, False, False, 0)
-        right_controls.pack_start(service_action_row, False, False, 0)
+        # Network tab (moved from main status page)
+        netbox = self.make_frame(network_page, "Network", "network")
+        self.add_row(netbox, "ip", "IP Address", "network")
+        self.add_row(netbox, "eth", "Ethernet")
+        self.add_row(netbox, "wifi", "Wi-Fi", "wifi")
+        self.add_row(netbox, "active_link", "Active Link")
+        self.add_row(netbox, "wifi_trend", "Wi-Fi Trend")
+        self.add_row(netbox, "failover", "Failover")
+        self.add_row(netbox, "hotspot_watchdog", "Watchdog")
+        self.add_row(netbox, "bt", "Bluetooth", "bluetooth")
+        self.add_row(netbox, "bt_ctrl", "BT Controller")
 
-        self.status, status_row = self.make_icon_info_row(right_controls, "Ready", "radar", 14)
-        status_row.get_style_context().add_class("subtle")
+        # Launchers section (replaces network info on main status page)
+        launchbox = self.make_frame(status_col_right, "Launchers")
+        launch_row = Gtk.FlowBox()
+        launch_row.set_selection_mode(Gtk.SelectionMode.NONE)
+        launch_row.set_max_children_per_line(3)
+        launchbox.pack_start(launch_row, False, False, 0)
 
-        self.last_update, update_row = self.make_icon_info_row(right_controls, "Updated: --", "dashboard", 14)
-        update_row.get_style_context().add_class("subtle")
+        gps_nav_btn = Gtk.Button(label="GPS Nav")
+        self.decorate_button(gps_nav_btn, "satellite", "GPS Nav")
+        gps_nav_btn.connect("clicked", lambda _b: self.on_launch_clicked("GPS Nav"))
+        self.builtin_buttons["GPS Nav"] = gps_nav_btn
+        self.launch_buttons["GPS Nav"] = gps_nav_btn
+        launch_row.add(gps_nav_btn)
+        self.refresh_gps_nav_button()
 
-        self.header_plugin_info, plugin_row = self.make_icon_info_row(right_controls, "Plugins: loading", "terminal", 14)
-        plugin_row.get_style_context().add_class("subtle")
+        sidekick_btn = Gtk.Button(label="Sidekick Manager")
+        self.decorate_button(sidekick_btn, "radio", "Open Sidekick Manager")
+        self.launch_actions["Sidekick Manager"] = (
+            "python_module",
+            "sidekick_setup_ui.SidekickSetupWindow",
+        )
+        sidekick_btn.connect("clicked", lambda _b: self.on_launch_clicked("Sidekick Manager"))
+        self.launch_buttons["Sidekick Manager"] = sidekick_btn
+        launch_row.add(sidekick_btn)
 
-        chips_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        top_left_col.pack_start(chips_box, False, False, 0)
-        for key, text in [
-            ("chip_fix", "GPS: --"),
-            ("chip_wifi", "Wi-Fi: --"),
-            ("chip_gpsd", "gpsd: --"),
-            ("chip_readsb", "readsb: --"),
-        ]:
-            chip = Gtk.Label(label=text)
-            chip.get_style_context().add_class("chip")
-            chip.get_style_context().add_class("chip-muted")
-            chips_box.pack_start(chip, False, False, 0)
-            self.chips[key] = chip
+        for entry in BUILTIN_LAUNCHERS:
+            name = entry["name"]
+            btn = Gtk.Button(label=name)
+            self.decorate_button(btn, entry.get("icon"), name)
+            candidates = entry["commands"]
+            available = launch_target_available(candidates) if candidates else True
+            cmd = resolve_first_command(candidates) if candidates else "true"
+            self.launch_actions[name] = cmd or ("true" if not candidates else None)
+            btn.set_sensitive(available)
+            btn.set_tooltip_text(
+                f"Launch {name}" if available else f"Missing dependency: {candidate_label(candidates)}"
+            )
+            btn.connect("clicked", lambda _b, n=name: self.on_launch_clicked(n))
+            self.builtin_buttons[name] = btn
+            self.launch_buttons[name] = btn
+            launch_row.add(btn)
 
-        self.alert_summary = Gtk.Label(label="Alerts: monitoring enabled")
-        self.alert_summary.set_xalign(0)
-        self.alert_summary.get_style_context().add_class("subtle")
-        top_left_col.pack_start(self.alert_summary, False, False, 0)
+        # GPS tab (own page, full width)
+        gps_page.pack_start(gps_cols, False, False, 0)
+        gps_col_left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        gps_col_right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        gps_cols.pack_start(gps_col_left, True, True, 0)
+        gps_cols.pack_start(gps_col_right, True, True, 0)
 
-        tactical_hint = Gtk.Label(label="Tactical")
-        tactical_hint.set_xalign(0)
-        tactical_hint.get_style_context().add_class("subtle")
-        tactical_col.pack_start(tactical_hint, False, False, 0)
+        gpsbox = self.make_frame(gps_col_left, "GPS Fix", "satellite")
+        self.add_row(gpsbox, "fix", "Fix", "satellite")
+        self.add_row(gpsbox, "sats", "Satellites")
+        self.add_row(gpsbox, "gpsdev", "Device")
+        self.add_row(gpsbox, "pos", "Position")
+        self.add_row(gpsbox, "speed", "Speed")
+        self.add_row(gpsbox, "track", "Track")
 
-        tactical_grid = Gtk.Grid(column_spacing=6, row_spacing=6)
-        tactical_grid.set_column_homogeneous(True)
-        tactical_col.pack_start(tactical_grid, False, False, 0)
+        gpsqbox = self.make_frame(gps_col_right, "GPS Quality", "satellite")
+        self.add_row(gpsqbox, "gps_quality", "Quality")
+        self.add_row(gpsqbox, "dop_summary", "DOP")
+        self.add_row(gpsqbox, "gps_trend", "Trend")
 
-        # Wi-Fi scanning is now integrated into Tactical WiFi Attacks interface
-        # This frees up the top-left slot for future features
-        
-        tactical_net_btn = Gtk.Button(label="Net")
-        self.decorate_button(tactical_net_btn, "network", "Net")
-        tactical_net_btn.connect("clicked", self.open_connectivity_detail_dialog)
-        tactical_net_btn.set_hexpand(True)
-        tactical_grid.attach(tactical_net_btn, 0, 1, 1, 1)
+        # TaskManager tab: compact host summary, services, and process detail.
+        task_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        task_title = Gtk.Label(label="System Tasks")
+        task_title.set_xalign(0)
+        task_title.get_style_context().add_class("section-title")
+        task_header.pack_start(task_title, True, True, 0)
+        task_refresh = Gtk.Button(label="Refresh")
+        self.decorate_button(task_refresh, "dashboard", "Refresh task list")
+        task_refresh.connect("clicked", lambda _b: self.refresh_task_manager())
+        task_header.pack_end(task_refresh, False, False, 0)
+        task_page.pack_start(task_header, False, False, 0)
 
-        tactical_gps_btn = Gtk.Button(label="GPS")
-        self.decorate_button(tactical_gps_btn, "satellite", "GPS")
-        tactical_gps_btn.connect("clicked", self.open_gps_quality_dialog)
-        tactical_gps_btn.set_hexpand(True)
-        tactical_grid.attach(tactical_gps_btn, 1, 0, 1, 1)
+        self.task_summary = Gtk.Label(label="Loading system details...")
+        self.task_summary.set_xalign(0)
+        self.task_summary.set_line_wrap(True)
+        self.task_summary.get_style_context().add_class("subtle")
+        task_page.pack_start(self.task_summary, False, False, 0)
 
-        # Tactical WiFi Attack Tools button (replaces Updates button)
-        tactical_attack_btn = Gtk.Button(label="WiFi Attacks")
-        self.decorate_button(tactical_attack_btn, "wifi", "WiFi Attacks")
-        tactical_attack_btn.connect("clicked", self.open_tactical_wifi_attacks_fullscreen)
-        tactical_attack_btn.set_hexpand(True)
-        tactical_grid.attach(tactical_attack_btn, 1, 1, 1, 1)
+        task_scroll = Gtk.ScrolledWindow()
+        task_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        task_scroll.set_vexpand(True)
+        self.task_text = Gtk.TextView()
+        self.task_text.set_editable(False)
+        self.task_text.set_cursor_visible(False)
+        self.task_text.set_monospace(True)
+        self.task_text.set_wrap_mode(Gtk.WrapMode.NONE)
+        task_scroll.add(self.task_text)
+        task_page.pack_start(task_scroll, True, True, 0)
+        self.refresh_task_manager()
 
-        metrics = Gtk.Grid(column_spacing=22, row_spacing=7)
-        top_left_col.pack_start(metrics, False, False, 2)
-        for i, (key, label) in enumerate([
-            ("cpu","CPU"), ("ram","RAM"), ("disk","NVMe"), ("battery","Battery")
-        ]):
-            row = Gtk.Box(spacing=8)
-            metric_icon = {
-                "cpu": "cpu",
-                "ram": "memory",
-                "disk": "nvme",
-                "battery": "battery",
-            }.get(key)
-            l = self.make_icon_label(label, metric_icon, 15)
-            l.get_style_context().add_class("metric")
-            v = Gtk.Label(label="—")
-            v.set_xalign(1.0)
-            row.pack_start(l, False, False, 0)
-            row.pack_end(v, True, True, 0)
-            metrics.attach(row, i % 2, i // 2, 1, 1)
-            self.labels[key] = v
+        # API Status tab: endpoint contract checks run when this tab is opened.
+        api_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        api_title = Gtk.Label(label="Sidekick API Endpoint Status")
+        api_title.set_xalign(0)
+        api_title.get_style_context().add_class("section-title")
+        api_header.pack_start(api_title, True, True, 0)
+        api_refresh = Gtk.Button(label="Check Now")
+        self.decorate_button(api_refresh, "dashboard", "Check API endpoints")
+        api_refresh.connect("clicked", lambda _b: self.run_api_status_checks())
+        api_header.pack_end(api_refresh, False, False, 0)
+        api_page.pack_start(api_header, False, False, 0)
 
-        panels = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        main_col.pack_start(panels, False, False, 2)
+        self.api_status_summary = Gtk.Label(label="Open this tab to check the API.")
+        self.api_status_summary.set_xalign(0)
+        self.api_status_summary.get_style_context().add_class("subtle")
+        api_page.pack_start(self.api_status_summary, False, False, 0)
 
-        self.gps_box = self.make_frame(panels, "GPS / Services", "satellite")
-        self.net_box = self.make_frame(panels, "Network / Wireless", "network")
+        api_scroll = Gtk.ScrolledWindow()
+        api_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        api_scroll.set_vexpand(True)
+        self.api_status_text = Gtk.TextView()
+        self.api_status_text.set_editable(False)
+        self.api_status_text.set_cursor_visible(False)
+        self.api_status_text.set_monospace(True)
+        self.api_status_text.set_wrap_mode(Gtk.WrapMode.NONE)
+        api_scroll.add(self.api_status_text)
+        api_page.pack_start(api_scroll, True, True, 0)
 
-        for key, label in [
-            ("fix","GPS Fix"), ("sats","Satellites"), ("gpsdev","GPS Device"),
-            ("pos","Position"), ("speed","Speed"), ("track","Heading"),
-            ("gps_quality","GPS Quality"),
-            ("dop_summary","DOP (H/V/P)"),
-            ("gpsd","gpsd"), ("readsb","readsb")
-        ]:
-            icon_name = {
-                "fix": "navigation",
-                "sats": "satellite",
-                "gpsdev": "terminal",
-                "pos": "map",
-                "speed": "radar",
-                "track": "navigation",
-                "gps_quality": "dashboard",
-                "dop_summary": "radar",
-                "gpsd": "radio-tower",
-                "readsb": "plane",
-            }.get(key)
-            self.add_row(self.gps_box, key, label, icon_name)
-
-        self.add_row(self.net_box, "ip", "IP", "network")
-        self.add_row(self.net_box, "eth", "Ethernet", "ethernet")
-        self.add_row(self.net_box, "bt", "Bluetooth", "bluetooth")
-        self.add_row(self.net_box, "bt_ctrl", "BT Ctrl", "radio-tower")
-        self.add_row(self.net_box, "wifi", "Wi-Fi", "wifi")
-        self.add_row(self.net_box, "active_link", "Active Link", "network")
-        self.add_row(self.net_box, "failover", "Failover", "switch-horizontal")
-        self.add_row(self.net_box, "hotspot_watchdog", "Hotspot Watch", "shield")
-
-        radio_frame = Gtk.Frame()
-        radio_frame.set_label_widget(self.make_icon_label("HackerGadgets AIO V2 Radio Power", "radio", 15))
-        main_col.pack_start(radio_frame, False, False, 0)
-        radio_box = Gtk.Box(spacing=10)
-        radio_box.set_border_width(7)
-        radio_frame.add(radio_box)
-
-        if aio_available():
-            for dev in ("GPS","SDR","LORA", "USB"):
-                group = Gtk.Box(spacing=5)
-                dot = Gtk.Label(label="●")
-                text = Gtk.Label(label=self.radio_display_name(dev))
-                sw = Gtk.Switch()
-                sw.connect("notify::active", self.on_radio_switch_toggled, dev)
-                self.radio_dots[dev] = dot
-                self.radio_text[dev] = text
-                self.radio_switches[dev] = sw
-                group.pack_start(dot, False, False, 0)
-                group.pack_start(text, False, False, 3)
-                group.pack_start(sw, False, False, 0)
-                radio_box.pack_start(group, True, True, 0)
-
-            bt_group = Gtk.Box(spacing=5)
-            bt_dot = Gtk.Label(label="●")
-            bt_text = Gtk.Label(label="Bluetooth")
-            bt_sw = Gtk.Switch()
-            bt_sw.connect("notify::active", self.on_bluetooth_switch_toggled)
-            bt_group.pack_start(bt_dot, False, False, 0)
-            bt_group.pack_start(bt_text, False, False, 3)
-            bt_group.pack_start(bt_sw, False, False, 0)
-            radio_box.pack_start(bt_group, True, True, 0)
-            self.bt_switch = bt_sw
-            self.bt_toggle_dot = bt_dot
-            self.bt_toggle_label = bt_text
-            self.bt_toggle_group = bt_group
-        else:
-            lab = Gtk.Label(label="aiov2_ctl not detected — radio controls unavailable")
-            lab.get_style_context().add_class("subtle")
-            radio_box.pack_start(lab, True, True, 0)
-
-        apps = Gtk.FlowBox()
-        apps.set_max_children_per_line(6)
-        apps.set_selection_mode(Gtk.SelectionMode.NONE)
-        apps.set_column_spacing(6)
-        apps.set_row_spacing(6)
-        main_col.pack_start(apps, False, False, 0)
-        buttons = [
-            ("GPS Nav",None,None),
-            (
-                "Pure Maps",
-                ["pure-maps", "puremaps", "flatpak:app.puremaps.PureMaps"],
-                ["pure-maps", "puremaps", "flatpak:app.puremaps.PureMaps"],
-            ),
-            (
-                "Organic Maps",
-                ["organicmaps", "omaps", "OMaps", "flatpak:app.organicmaps.desktop"],
-                ["organicmaps", "omaps", "OMaps", "flatpak:app.organicmaps.desktop"],
-            ),
-            (
-                "PyGPS",
-                ["pygpsclient", "/usr/local/bin/pygpsclient"],
-                ["pygpsclient", "/usr/local/bin/pygpsclient"],
-            ),
-            ("OSM Scout","flatpak run io.github.rinigus.OSMScoutServer","flatpak:io.github.rinigus.OSMScoutServer"),
-            (
-                "SDR++",
-                [
-                    "sdrpp",
-                    "sdr++",
-                    "sdrpp-qt",
-                    "flatpak:org.sdrpp.sdrpp",
-                    "flatpak:org.sdrpp.SDRPlusPlus",
-                ],
-                [
-                    "sdrpp",
-                    "sdr++",
-                    "sdrpp-qt",
-                    "flatpak:org.sdrpp.sdrpp",
-                    "flatpak:org.sdrpp.SDRPlusPlus",
-                ],
-            ),
-            ("GQRX","gqrx","gqrx"),
-            ("ADS-B","xdg-open http://127.0.0.1/tar1090/","xdg-open"),
-            ("Wireshark","wireshark","wireshark"),
-            ("Kismet","xdg-open http://127.0.0.1:2501/","xdg-open"),
-            ("AIO Control","aiov2_ctl --gui","aiov2_ctl"),
-        ]
-        for name, cmd, check in buttons:
-            b = Gtk.Button(label=name)
-            launcher_icon = {
-                "GPS Nav": "navigation",
-                "Pure Maps": "map",
-                "Organic Maps": "map",
-                "PyGPS": "satellite",
-                "OSM Scout": "radar",
-                "SDR++": "radio",
-                "GQRX": "radio-tower",
-                "ADS-B": "plane",
-                "Wireshark": "network",
-                "Kismet": "wifi",
-                "AIO Control": "power",
-            }.get(name)
-            self.decorate_button(b, launcher_icon, name)
-            self.builtin_buttons[name] = b
-            if name == "GPS Nav":
-                self.launch_buttons[name] = b
-                b.connect("clicked", lambda _b, n=name: self.on_launch_clicked(n))
-                apps.add(b)
-                continue
-
-            if isinstance(cmd, (list, tuple)):
-                resolved = resolve_first_command(cmd)
-                if not resolved and name == "SDR++":
-                    discovered = discover_flatpak_app_id(["sdrpp", "sdr++", "sdr plus plus"])
-                    if discovered:
-                        resolved = f"flatpak run {discovered}"
-                available = bool(resolved)
-                self.launch_actions[name] = resolved
-                b.set_sensitive(available)
-                if available:
-                    b.set_tooltip_text(f"Launch {name}")
-                else:
-                    b.set_tooltip_text(f"Missing dependency: {candidate_label(check)}")
-                b.connect("clicked", lambda _b, n=name: self.on_launch_clicked(n))
-                apps.add(b)
-                continue
-
-            available = launch_target_available(check)
-            b.set_sensitive(available)
-            self.launch_actions[name] = cmd
-            if available:
-                b.set_tooltip_text(f"Launch {name}")
-            else:
-                b.set_tooltip_text(f"Missing dependency: {candidate_label(check)}")
-            b.connect("clicked", lambda _b, n=name: self.on_launch_clicked(n))
-            apps.add(b)
-
+                # Plugins section (on its own tab, launchers moved to main page)
+        pluginbox = self.make_frame(plugins_page, "Plugins")
+        self.header_plugin_info = Gtk.Label(label="Plugins: loading…")
+        self.header_plugin_info.set_xalign(0)
+        pluginbox.pack_start(self.header_plugin_info, False, False, 0)
         self.plugin_box = Gtk.FlowBox()
-        self.plugin_box.set_max_children_per_line(5)
         self.plugin_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.plugin_box.set_column_spacing(2)
-        self.plugin_box.set_row_spacing(2)
-        self.ac1200_diag_box = self.create_ac1200_diagnostics_panel(right_controls)
-        right_controls.pack_start(self.plugin_box, False, False, 0)
+        self.plugin_box.set_max_children_per_line(3)
+        pluginbox.pack_start(self.plugin_box, False, False, 0)
         self.refresh_plugin_buttons()
 
-        self.show_all()
-        GLib.idle_add(self.fullscreen)
-        if self.settings.get("profile") in PROFILE_PRESETS:
-            self.apply_profile(self.settings.get("profile"), announce=False)
-            self._updating_profile_combo = True
-            self.profile_combo.set_active_id(self.settings.get("profile"))
-            self._updating_profile_combo = False
-        else:
-            self.refresh_profile_visibility()
-        self.refresh_gps_nav_button()
-        self.refresh_async()
-        GLib.timeout_add_seconds(7, self.check_for_new_release_once)
+        # ---- Status bar ----
+        status_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        status_bar.set_border_width(6)
+        status_bar.get_style_context().add_class("subtle")
+        root_box.pack_start(status_bar, False, False, 0)
+        self.status = Gtk.Label(label="Ready")
+        self.status.set_xalign(0)
+        status_bar.pack_start(self.status, True, True, 0)
+        self.last_update = Gtk.Label(label="Updated: --")
+        self.last_update.get_style_context().add_class("subtle")
+        status_bar.pack_end(self.last_update, False, False, 0)
+        self.app_version_label = Gtk.Label(label=f"K7BAT Status App v{APP_VERSION}")
+        self.app_version_label.get_style_context().add_class("subtle")
+        status_bar.pack_end(self.app_version_label, False, False, 8)
 
-    def create_ac1200_diagnostics_panel(self, parent):
-        """Show the HG AC1200 health summary in the launcher area."""
-        frame = Gtk.Frame()
-        frame.set_label_widget(self.make_icon_label("HG AC1200 Diagnostics", "wifi", 14))
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
-        box.set_border_width(6)
-        frame.add(box)
+        self.refresh_profile_visibility()
+        self.apply_gps_dependency_state(None)
+        self.apply_sdr_dependency_state(None)
+        if self.settings.get("sidekick_api_autostart", False):
+            GLib.idle_add(self.on_start_sidekick_api_clicked, None)
+        # Use manual timing instead of GLib timeout to avoid tight loop bug
+        GLib.timeout_add_seconds(1, self.check_refresh_schedule)
 
-        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        summary = Gtk.Label(label="Checking...")
-        summary.set_xalign(0)
-        summary.set_hexpand(True)
-        refresh = Gtk.Button(label="Refresh")
-        refresh.set_tooltip_text("Run read-only Hacker Gadgets AC1200 checks")
-        refresh.connect("clicked", lambda _button: self.refresh_ac1200_diagnostics())
-        header.pack_start(summary, True, True, 0)
-        header.pack_end(refresh, False, False, 0)
-        box.pack_start(header, False, False, 0)
+    def on_main_tab_changed(self, _notebook, _page, page_num):
+        """Run the API contract check whenever the API Status tab is opened."""
+        if page_num < 0:
+            return
+        tab_label = _notebook.get_tab_label(_page)
+        if tab_label and tab_label.get_text() == "API Status":
+            self.run_api_status_checks()
 
-        details = Gtk.Label(label="Loading USB, driver, RFKILL, firmware, and Wi-Fi capability checks...")
-        details.set_xalign(0)
-        details.set_line_wrap(True)
-        details.set_selectable(True)
-        box.pack_start(details, False, False, 0)
-        parent.pack_start(frame, False, False, 0)
+    def run_api_status_checks(self):
+        """Check safe GET/POST API endpoints without blocking the GTK thread."""
+        if getattr(self, "_api_check_running", False):
+            return
+        self._api_check_running = True
+        self.api_status_summary.set_text("Checking API endpoints…")
+        self.api_status_text.get_buffer().set_text("Starting API checks…\n")
+        threading.Thread(target=self._api_status_worker, daemon=True).start()
 
-        self.ac1200_diag_summary = summary
-        self.ac1200_diag_details = details
-        GLib.idle_add(self.refresh_ac1200_diagnostics)
-        return frame
-
-    def refresh_ac1200_diagnostics(self):
-        if AC1200Diagnostics is None:
-            self.ac1200_diag_summary.set_text("Unavailable")
-            self.ac1200_diag_details.set_text("AC1200 diagnostics module is not installed.")
-            return False
-
-        self.ac1200_diag_summary.set_text("Checking...")
-        self.ac1200_diag_details.set_text("Reading HG AC1200 hardware and driver state...")
-
-        def worker():
+    def _api_status_worker(self):
+        base_url = self.settings.get("sidekick_api_url", "http://127.0.0.1:8080").rstrip("/")
+        device_id = f"api-status-{os.getpid()}-{int(time.time())}"
+        mac_address = "AA:BB:CC:DD:EE:70"
+        checks = [
+            ("GET", "/api/health", None, {200}),
+            ("GET", "/api/version", None, {200}),
+            ("GET", "/api/v2/health", None, {200}),
+            ("GET", "/api/v2/version", None, {200}),
+            ("GET", "/api/v2/capabilities", None, {200}),
+            ("GET", "/api/v2/ready", None, {200}),
+            ("GET", "/api/v2/schema", None, {200}),
+            ("GET", "/api/v2/status", None, {200}),
+            ("GET", "/api/v2/system", None, {200}),
+            ("GET", "/api/v2/system/services", None, {200}),
+            ("GET", "/api/v2/system/processes", None, {200}),
+            ("GET", "/api/v2/system/storage", None, {200}),
+            ("GET", "/api/v2/network", None, {200}),
+            ("GET", "/api/v2/network/interfaces", None, {200}),
+            ("GET", "/api/v2/gps", None, {200}),
+            ("GET", "/api/v2/gps/satellites", None, {200}),
+            ("GET", "/api/v2/gps/track", None, {200}),
+            ("GET", "/api/v2/radio", None, {200}),
+            ("GET", "/api/v2/sdr", None, {200}),
+            ("GET", "/api/v2/adsb/aircraft", None, {200}),
+            ("GET", "/api/v2/meshtastic/nodes", None, {200}),
+            ("GET", "/api/v2/meshtastic/messages", None, {200}),
+            ("GET", "/api/v2/apps", None, {200}),
+            ("GET", "/api/v2/firmware", None, {200}),
+            ("POST", "/api/v2/device/register", {
+                "device_id": device_id,
+                "name": "API Status Check",
+                "board": "status-app",
+                "firmware": APP_VERSION,
+                "mac_address": mac_address,
+                "features": {"api_status_check": True},
+            }, {200}),
+            ("POST", "/api/v2/device/heartbeat", {"device_id": device_id}, {200}),
+            ("POST", "/api/v2/telemetry", {"device_id": device_id, "source": "status-app-check"}, {200}),
+            ("POST", "/api/v2/profile", {"profile": "FIELD"}, {200}),
+            ("POST", "/api/v2/screen", {"screen": "HOME"}, {200}),
+            ("POST", "/api/v2/command", {"target": "system", "command": "status"}, {200}),
+            ("POST", "/api/v2/device/enroll/start", {
+                "device_id": device_id,
+                "name": "API Status Check",
+                "mac_address": mac_address,
+                "board": "status-app",
+            }, {200}),
+            ("POST", "/api/v2/device/enroll/confirm", {
+                "device_id": device_id,
+                "mac_address": mac_address,
+                "code": "000000",
+            }, {400}),
+        ]
+        lines = [f"API base: {base_url}", "", "METHOD  STATUS  EXPECTED  ENDPOINT", "------  ------  --------  --------"]
+        passed = 0
+        for method, path, payload, expected in checks:
             try:
-                report = AC1200Diagnostics().run_basic()
-                GLib.idle_add(self.show_ac1200_diagnostics, report)
+                body = None
+                headers = {"Accept": "application/json"}
+                if payload is not None:
+                    body = json.dumps(payload).encode("utf-8")
+                    headers["Content-Type"] = "application/json"
+                request = urllib.request.Request(
+                    f"{base_url}{path}", data=body, headers=headers, method=method
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    status_code = response.status
+                    response.read(2048)
+                result = "PASS" if status_code in expected else "FAIL"
+            except urllib.error.HTTPError as exc:
+                status_code = exc.code
+                result = "PASS" if status_code in expected else "FAIL"
             except Exception as exc:
-                GLib.idle_add(self.show_ac1200_diagnostics_error, str(exc))
+                status_code = "ERR"
+                result = f"FAIL ({str(exc)[:45]})"
+            if result == "PASS":
+                passed += 1
+            expected_text = "/".join(str(code) for code in sorted(expected))
+            lines.append(f"{method:<7} {str(status_code):<7} {expected_text:<9} {path}  {result}")
 
-        threading.Thread(target=worker, daemon=True).start()
+        total = len(checks)
+        GLib.idle_add(self._apply_api_status_results, lines, passed, total)
+
+    def _apply_api_status_results(self, lines, passed, total):
+        self.api_status_text.get_buffer().set_text("\n".join(lines) + "\n")
+        self.api_status_summary.set_text(f"API checks complete: {passed}/{total} passed")
+        self._api_check_running = False
         return False
 
-    def show_ac1200_diagnostics(self, report):
-        summary = report.get("summary", {})
-        self.ac1200_diag_summary.set_text(
-            f"PASS {summary.get('pass', 0)}  WARN {summary.get('warn', 0)}  FAIL {summary.get('fail', 0)}"
-        )
-        lines = []
-        for check in report.get("checks", []):
-            status = check.get("status", "?")
-            details = check.get("details", {})
-            if status == "PASS":
-                marker = "OK"
-            elif status == "WARN":
-                marker = "WARN"
-            else:
-                marker = "FAIL"
-            detail_text = ""
-            if check.get("test") == "USB link speed":
-                detail_text = str(details.get("speed", "unknown"))
-            elif check.get("test") == "Supported bands":
-                detail_text = ", ".join(details.get("bands", [])) or "none"
-            elif check.get("test") == "RFKILL":
-                detail_text = ", ".join(details.get("targets", [])) or "not detected"
-            lines.append(f"[{marker}] {check.get('test', 'Check')}: {detail_text}".rstrip())
-        self.ac1200_diag_details.set_text("\n".join(lines) or "No diagnostic checks returned.")
-        return False
-
-    def show_ac1200_diagnostics_error(self, message):
-        self.ac1200_diag_summary.set_text("Error")
-        self.ac1200_diag_details.set_text(f"AC1200 diagnostic error: {message[:160]}")
-        return False
-        GLib.timeout_add_seconds(REFRESH_SECONDS, self.refresh_async)
+    def check_refresh_schedule(self):
+        """Manually check if 5 seconds have passed since last refresh"""
+        import time
+        current_time = time.time()
+        # Only schedule if not already scheduled and enough time has passed
+        if current_time - getattr(self, 'last_refresh_time', 0) >= 5:
+            if not getattr(self, '_refresh_scheduled', False):
+                self._refresh_scheduled = True
+                GLib.idle_add(self.refresh_async)
+        return True  # Continue checking every second
 
     def selected_gps_option(self):
         selected = self.settings.get("gps_nav_app", "navit")
@@ -2143,6 +2092,14 @@ class App(Gtk.Window):
             if opt["id"] == selected:
                 return opt
         return GPS_NAV_OPTIONS[0]
+
+    def add_nav_button(self, label, icon):
+        """Add navigation button to sidebar"""
+        btn = Gtk.Button(label=f'{icon}  {label}')
+        btn.set_halign(Gtk.Align.START)
+        btn.get_style_context().add_class('sidebar-item')
+        btn.connect('clicked', lambda _b: self.stack.set_visible_child_name(label.lower()))
+        self.sidebar.pack_start(btn, False, False, 0)
 
     def apply_profile(self, profile_id, announce=True):
         preset = PROFILE_PRESETS.get(profile_id)
@@ -2323,6 +2280,20 @@ class App(Gtk.Window):
         state = event.state
         alt = bool(state & Gdk.ModifierType.MOD1_MASK)
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+
+        if key == "F11":
+            window_state = self.get_window().get_state() if self.get_window() else 0
+            if window_state & Gdk.WindowState.FULLSCREEN:
+                self.unfullscreen()
+            else:
+                self.fullscreen()
+            return True
+        if key == "Escape":
+            Gtk.main_quit()
+            return True
+
+        if not hasattr(self, "profile_combo"):
+            return False
 
         if alt and key == "1":
             self._updating_profile_combo = True
@@ -2726,7 +2697,6 @@ class App(Gtk.Window):
                 tail = out.splitlines()[-1][:90] if out else "unknown error"
                 msg = f"{service} restart failed: {tail}"
             GLib.idle_add(self.status.set_text, msg)
-            GLib.timeout_add_seconds(1, self.refresh_async)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2784,9 +2754,6 @@ class App(Gtk.Window):
                 self.version_label.set_text(f"v{new_version}")
             
             self.status.set_text(f"Restarted to v{new_version}")
-            
-            # Auto-refresh after restart
-            GLib.timeout_add_seconds(1, self.refresh_async)
             
             return False  # Stop GLib.idle_add loop
         except Exception as e:
@@ -2901,9 +2868,6 @@ class App(Gtk.Window):
                 tail = out.splitlines()[-1][:90] if out else "unknown error"
                 msg = f"bluetooth {action} failed: {tail}"
             GLib.idle_add(self.status.set_text, msg)
-            GLib.timeout_add_seconds(1, self.refresh_async)
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def on_sdr_exit_restart_readsb(self, _exit_code=None):
         self.status.set_text("SDR++ closed: restarting readsb…")
@@ -2918,9 +2882,6 @@ class App(Gtk.Window):
                 tail = out.splitlines()[-1][:90] if out else "unknown error"
                 msg = f"SDR++ closed: readsb restart failed: {tail}"
             GLib.idle_add(self.status.set_text, msg)
-            GLib.timeout_add_seconds(1, self.refresh_async)
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def on_remote_assist_clicked(self, _button):
         """Create diagnostics bundle for remote assistance."""
@@ -3058,7 +3019,6 @@ class App(Gtk.Window):
                 else:
                     tail = out.splitlines()[-1][:90] if out else "unknown error"
                     GLib.idle_add(self.status.set_text, f"{name}: readsb stop failed: {tail}")
-                GLib.timeout_add_seconds(1, self.refresh_async)
 
             threading.Thread(target=worker, daemon=True).start()
             return
@@ -3087,7 +3047,6 @@ class App(Gtk.Window):
                     GLib.idle_add(self.status.set_text, f"ADS-B opened via {via}")
                 else:
                     GLib.idle_add(self.status.set_text, f"ADS-B open failed: {via}")
-                GLib.timeout_add_seconds(1, self.refresh_async)
 
             threading.Thread(target=worker, daemon=True).start()
             return
@@ -3267,6 +3226,90 @@ class App(Gtk.Window):
             self.stop_mission_recording(reason="error")
             self.status.set_text(f"Mission recorder stopped on write error: {str(e)[:100]}")
 
+    def sidekick_api_pid(self):
+        rc, out = run_rc(r"pgrep -f '[p]ython3.*status_api.py'", 3)
+        if rc == 0 and out.strip():
+            return out.strip().splitlines()[0]
+        return None
+
+    def sidekick_api_status_text(self):
+        pid = self.sidekick_api_pid()
+        return f"Sidekick API server: RUNNING (pid {pid})" if pid else "Sidekick API server: STOPPED"
+
+    def sidekick_api_main_status_text(self):
+        return "Sidekick API: RUNNING" if self.sidekick_api_pid() else "Sidekick API: STOPPED"
+
+    def refresh_sidekick_api_status_label(self):
+        settings_label = getattr(self, "_sidekick_api_status_label", None)
+        if settings_label is not None:
+            settings_label.set_text(self.sidekick_api_status_text())
+        main_label = getattr(self, "sidekick_api_main_label", None)
+        if main_label is not None:
+            main_label.set_text(self.sidekick_api_main_status_text())
+
+    def on_start_sidekick_api_clicked(self, _button):
+        if self.sidekick_api_pid():
+            self.status.set_text("Sidekick API server already running")
+            self.refresh_sidekick_api_status_label()
+            return
+        api_path = APP_DIR.parent / "status_api.py"
+        if not api_path.exists():
+            self.status.set_text(f"Sidekick API server: {api_path} not found")
+            return
+        log_path = Path.home() / ".local" / "share" / "k7bat-uconsole-status" / "status_api.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(log_path, "a") as log_file:
+                subprocess.Popen(
+                    ["/usr/bin/python3", str(api_path), "--port", "8080"],
+                    stdout=log_file,
+                    stderr=log_file,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            self.status.set_text("Sidekick API server: starting…")
+        except Exception as e:
+            self.status.set_text(f"Sidekick API server failed to start: {e}")
+        GLib.timeout_add_seconds(1, self._sidekick_api_status_tick)
+
+    def on_stop_sidekick_api_clicked(self, _button):
+        pid = self.sidekick_api_pid()
+        if not pid:
+            self.status.set_text("Sidekick API server is not running")
+            self.refresh_sidekick_api_status_label()
+            return
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+            logging.info("Sidekick API stop requested for pid %s", pid)
+            self.status.set_text(f"Sidekick API server: stopping (pid {pid})…")
+        except (OSError, ValueError) as exc:
+            logging.exception("Sidekick API stop failed for pid %s", pid)
+            self.status.set_text(f"Sidekick API server stop failed: {exc}")
+        GLib.timeout_add_seconds(1, self._sidekick_api_status_tick)
+
+    def on_restart_sidekick_api_clicked(self, _button):
+        pid = self.sidekick_api_pid()
+        if pid:
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+                logging.info("Sidekick API restart requested for pid %s", pid)
+            except (OSError, ValueError) as exc:
+                logging.exception("Sidekick API restart stop failed for pid %s", pid)
+                self.status.set_text(f"Sidekick API restart failed: {exc}")
+                return
+        self.status.set_text("Sidekick API server: restarting…")
+        GLib.timeout_add(500, self._start_sidekick_api_after_stop)
+
+    def _start_sidekick_api_after_stop(self):
+        if self.sidekick_api_pid():
+            return True
+        self.on_start_sidekick_api_clicked(None)
+        return False
+
+    def _sidekick_api_status_tick(self):
+        self.refresh_sidekick_api_status_label()
+        return False
+
     def open_settings_dialog(self, _button):
         # Use a notebook with tabs for better organization and fullscreen support
         dialog = Gtk.Dialog(
@@ -3400,17 +3443,6 @@ class App(Gtk.Window):
         extra_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         extra_box.set_border_width(8)
 
-        # Pair Sidekick flow
-        device_pair_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        device_pair_label = Gtk.Label(label="Sidekick pairing")
-        device_pair_label.set_xalign(0)
-        device_pair_label.get_style_context().add_class("subtle")
-        device_pair_btn = Gtk.Button(label="Enroll Sidekick")
-        device_pair_btn.connect("clicked", self.on_enroll_sidekick_clicked)
-        device_pair_row.pack_start(device_pair_label, True, True, 0)
-        device_pair_row.pack_end(device_pair_btn, False, False, 0)
-        extra_box.pack_start(device_pair_row, False, False, 0)
-
         # Find GPS Apps button in settings
         find_gps_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         find_gps_label = Gtk.Label(label="GPS App Discovery")
@@ -3434,9 +3466,44 @@ class App(Gtk.Window):
 
         notebook.append_page(extra_box, Gtk.Label(label="Additional"))
 
+        # ===== Sidekick API Server Tab =====
+        api_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        api_box.set_border_width(8)
+
+        api_info = Gtk.Label(
+            label="Runs status_api.py so the ESP32 Sidekick can poll /api/sidekick over Wi-Fi."
+        )
+        api_info.set_xalign(0)
+        api_info.set_line_wrap(True)
+        api_info.get_style_context().add_class("subtle")
+        api_box.pack_start(api_info, False, False, 0)
+
+        api_status_label = Gtk.Label(label=self.sidekick_api_status_text())
+        api_status_label.set_xalign(0)
+        api_box.pack_start(api_status_label, False, False, 0)
+        self._sidekick_api_status_label = api_status_label
+
+        api_btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        api_box.pack_start(api_btn_row, False, False, 0)
+
+        start_api_btn = Gtk.Button(label="Start API Server")
+        start_api_btn.connect("clicked", self.on_start_sidekick_api_clicked)
+        api_btn_row.pack_start(start_api_btn, False, False, 0)
+
+        stop_api_btn = Gtk.Button(label="Stop API Server")
+        stop_api_btn.connect("clicked", self.on_stop_sidekick_api_clicked)
+        api_btn_row.pack_start(stop_api_btn, False, False, 0)
+
+        autostart_check = Gtk.CheckButton(label="Start API server automatically on app launch")
+        autostart_check.set_active(bool(self.settings.get("sidekick_api_autostart", False)))
+        api_box.pack_start(autostart_check, False, False, 0)
+
+        notebook.append_page(api_box, Gtk.Label(label="Sidekick API"))
+
         dialog.show_all()
         resp = dialog.run()
         if resp == Gtk.ResponseType.OK:
+            self.settings["sidekick_api_autostart"] = autostart_check.get_active()
             selected = combo.get_active_id() or "navit"
             self.settings["gps_nav_app"] = selected
             self.settings["alerts"] = {
@@ -3467,99 +3534,16 @@ class App(Gtk.Window):
                 tags=["auto", "settings"],
             )
             self.alert_settings = self.settings["alerts"]
-            self._updating_profile_combo = True
-            self.profile_combo.set_active_id("custom")
-            self._updating_profile_combo = False
+            if hasattr(self, "profile_combo"):
+                self._updating_profile_combo = True
+                self.profile_combo.set_active_id("custom")
+                self._updating_profile_combo = False
             self.refresh_gps_nav_button()
             opt = self.gps_option_by_id(selected)
             if opt:
                 self.status.set_text(f"Saved: GPS Nav set to {opt['label']}")
             self.refresh_plugin_buttons()
         dialog.destroy()
-
-        def on_enroll_sidekick_clicked(self, _button):
-            """Start a Sidekick enrollment flow against the uConsole API."""
-            api_url = self.settings.get("sidekick_api_url", "http://127.0.0.1:8080")
-            device_id = self.settings.get("sidekick_device_id") or "sidekick-uconsole-001"
-            mac_address = self.settings.get("sidekick_mac_address") or "AA:BB:CC:DD:EE:FF"
-
-            dialog = Gtk.Dialog(title="Enroll Sidekick", transient_for=self, flags=0)
-            dialog.add_buttons("Close", Gtk.ResponseType.CLOSE)
-            content = dialog.get_content_area()
-            content.set_spacing(10)
-            content.set_border_width(10)
-
-            fields = Gtk.Grid()
-            fields.set_column_spacing(8)
-            fields.set_row_spacing(6)
-
-            device_label = Gtk.Label(label="Device ID:")
-            device_label.set_xalign(0)
-            device_entry = Gtk.Entry()
-            device_entry.set_text(device_id)
-
-            mac_label = Gtk.Label(label="MAC address:")
-            mac_label.set_xalign(0)
-            mac_entry = Gtk.Entry()
-            mac_entry.set_text(mac_address)
-
-            code_label = Gtk.Label(label="Pairing code:")
-            code_label.set_xalign(0)
-            code_value = Gtk.Label(label="Waiting...")
-            code_value.set_xalign(0)
-            code_value.get_style_context().add_class("subtle")
-
-            fields.attach(device_label, 0, 0, 1, 1)
-            fields.attach(device_entry, 1, 0, 1, 1)
-            fields.attach(mac_label, 0, 1, 1, 1)
-            fields.attach(mac_entry, 1, 1, 1, 1)
-            fields.attach(code_label, 0, 2, 1, 1)
-            fields.attach(code_value, 1, 2, 1, 1)
-
-            content.pack_start(fields, False, False, 0)
-            content.pack_start(Gtk.Label(label="Use the generated code on the Sidekick to complete pairing."), False, False, 0)
-            dialog.show_all()
-
-            def start_enrollment(_widget):
-                device = device_entry.get_text().strip()
-                mac = mac_entry.get_text().strip()
-                if not device:
-                    self.status.set_text("Sidekick enrollment requires a device_id")
-                    return
-
-                payload = json.dumps({
-                    "device_id": device,
-                    "name": "K7BAT Sidekick",
-                    "mac_address": mac or "AA:BB:CC:DD:EE:FF",
-                    "board": "sidekick",
-                }).encode("utf-8")
-
-                req = urllib.request.Request(
-                    f"{api_url}/api/v2/device/enroll/start",
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-
-                try:
-                    with urllib.request.urlopen(req, timeout=8) as resp:
-                        body = json.loads(resp.read().decode("utf-8", "replace"))
-                    code = str(body.get("code", "")).strip()
-                    self.settings["sidekick_device_id"] = device
-                    self.settings["sidekick_mac_address"] = mac or "AA:BB:CC:DD:EE:FF"
-                    self.settings["sidekick_api_url"] = api_url
-                    save_settings(self.settings)
-                    code_value.set_text(code if code else "No code returned")
-                    self.status.set_text(f"Sidekick pairing started. Code: {code}")
-                except Exception as exc:
-                    code_value.set_text("Request failed")
-                    self.status.set_text(f"Pairing failed: {exc}")
-
-            btn = Gtk.Button(label="Generate Code")
-            btn.connect("clicked", start_enrollment)
-            content.pack_end(btn, False, False, 0)
-            dialog.run()
-            dialog.destroy()
 
     def open_plugins_dialog(self, parent_dialog=None):
         dlg = Gtk.Dialog(title="Custom Plugin Launchers", transient_for=self, flags=0)
@@ -3713,15 +3697,15 @@ class App(Gtk.Window):
         else:
             f.set_label(title)
         parent.pack_start(f, True, True, 0)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.set_border_width(8)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.set_border_width(5)
         f.add(box)
         return box
 
     def add_row(self, parent, key, title, icon_name=None):
-        row = Gtk.Box(spacing=6)
+        row = Gtk.Box(spacing=4)
         name = self.make_icon_label(title, icon_name, 14)
-        name.set_size_request(115, -1)
+        name.set_size_request(105, -1)
         name.get_style_context().add_class("subtle")
         val = Gtk.Label(label="—")
         val.set_xalign(0)
@@ -4946,7 +4930,6 @@ class App(Gtk.Window):
             if out and rc != 0:
                 msg += f" — {out.splitlines()[-1][:90]}"
             GLib.idle_add(self.status.set_text, msg)
-            GLib.timeout_add_seconds(1, self.refresh_async)
         threading.Thread(target=worker, daemon=True).start()
 
     def extract_wifi_signal_dbm(self, wifi_rows):
@@ -5103,10 +5086,65 @@ class App(Gtk.Window):
             },
         }
 
+    def refresh_task_manager(self):
+        """Refresh host resource, service, and process details."""
+        try:
+            load = Path("/proc/loadavg").read_text(encoding="utf-8").split()
+            uptime = Path("/proc/uptime").read_text(encoding="utf-8").split()[0]
+            uptime_seconds = int(float(uptime))
+            uptime_text = f"{uptime_seconds // 86400}d {(uptime_seconds % 86400) // 3600:02d}h {(uptime_seconds % 3600) // 60:02d}m"
+        except Exception:
+            load = ["unknown"]
+            uptime_text = "unknown"
+
+        try:
+            memory = subprocess.run(
+                ["free", "-h"], capture_output=True, text=True, timeout=3, check=False
+            ).stdout.strip()
+        except Exception:
+            memory = "memory details unavailable"
+
+        try:
+            disk = shutil.disk_usage("/")
+            disk_text = f"Disk: {disk.free / (1024 ** 3):.1f} GiB free / {disk.total / (1024 ** 3):.1f} GiB"
+        except Exception:
+            disk_text = "Disk: unavailable"
+
+        service_names = ["k7bat-status-api", "gpsd", "gpsd.socket", "bluetooth", "readsb", "NetworkManager"]
+        service_lines = []
+        for service in service_names:
+            service_lines.append(f"{service:20} {service_state(service)}")
+
+        try:
+            processes = subprocess.run(
+                ["ps", "-eo", "pid,ppid,user,%cpu,%mem,stat,etime,comm,args", "--sort=-%cpu"],
+                capture_output=True, text=True, timeout=5, check=False
+            ).stdout.strip()
+            process_lines = "\n".join(processes.splitlines()[:41])
+        except Exception:
+            process_lines = "process details unavailable"
+
+        self.task_summary.set_text(
+            f"Load: {' '.join(load[:3])}    Uptime: {uptime_text}\n"
+            f"{disk_text}\n\nServices:\n" + "\n".join(service_lines)
+        )
+        self.task_text.get_buffer().set_text(
+            "TOP PROCESSES (sorted by CPU)\n\n" + process_lines
+        )
+
     def refresh_async(self):
+        import sys
+        import threading, traceback
+        thread_name = threading.current_thread().name
+        
         if getattr(self, "_refreshing", False):
-            return True
+            return False
         self._refreshing = True
+        # Clear scheduled flag since we're now executing
+        self._refresh_scheduled = False
+        # Record refresh time
+        import time
+        self.last_refresh_time = time.time()
         def worker():
             try:
                 data = self.collect()
@@ -5114,7 +5152,8 @@ class App(Gtk.Window):
             except Exception as e:
                 GLib.idle_add(self.on_refresh_error, str(e))
         threading.Thread(target=worker, daemon=True).start()
-        return True
+        threading.Thread(target=worker, daemon=True).start()
+        return False
 
     def on_refresh_error(self, err):
         self._refreshing = False
@@ -5122,111 +5161,150 @@ class App(Gtk.Window):
         return False
 
     def apply_data(self, d):
-        self._refreshing = False
-        self.latest_aio_states = dict(d.get("aio", {}) or {})
-        self.labels["cpu"].set_text(d["cpu"])
-        self.labels["ram"].set_text(d["ram"])
-        self.labels["disk"].set_text(d["disk"])
-        self.labels["battery"].set_text(d["battery"])
-        g = d["gps"]
-        self.labels["fix"].set_text(g["fix"])
-        self.labels["sats"].set_text(g["sats"])
-        self.labels["gpsdev"].set_text(g["device"])
-        self.labels["pos"].set_text(g["pos"])
-        self.labels["speed"].set_text(g["speed"])
-        self.labels["track"].set_text(g["track"])
-        self.labels["gps_quality"].set_text(
-            f"{g.get('confidence', '—')} {g.get('quality_grade', 'unknown')} • used {g.get('sats_used', '—')}"
-        )
-        self.labels["dop_summary"].set_text(
-            f"{g.get('hdop', '—')} / {g.get('vdop', '—')} / {g.get('pdop', '—')}"
-        )
-        self.labels["gpsd"].set_text(d["gpsd"])
-        self.labels["readsb"].set_text(d["readsb"])
-        self.labels["ip"].set_text(d["ip"])
-        self.labels["eth"].set_text(d["eth"])
-        self.labels["bt"].set_text(d["bt"])
-        self.labels["bt_ctrl"].set_text(d.get("bt_ctrl", "none"))
-        if d["wifi"]:
-            self.labels["wifi"].set_text(" | ".join(f"{iface}: {detail}" for iface, detail in d["wifi"][:2]))
-        else:
-            self.labels["wifi"].set_text("—")
-
-        self.update_connectivity_labels(d)
-
+        import sys
+        import threading
+        from datetime import datetime
+        thread_name = threading.current_thread().name
+        
         try:
-            sats_num = int(g.get("sats"))
-            self.gps_quality_history["sats"].append(sats_num)
-        except Exception:
-            pass
-        pdop_val = g.get("pdop_val")
-        if isinstance(pdop_val, (int, float)):
-            self.gps_quality_history["pdop"].append(float(pdop_val))
-
-        self.gps_quality_history["sats"] = self.gps_quality_history["sats"][-10:]
-        self.gps_quality_history["pdop"] = self.gps_quality_history["pdop"][-10:]
-        sats_tail = format_history_trend(self.gps_quality_history["sats"], 3)
-        pdop_tail = format_history_trend(self.gps_quality_history["pdop"], 3)
-        sats_dir = trend_direction(self.gps_quality_history["sats"], lower_better=False)
-        pdop_dir = trend_direction(self.gps_quality_history["pdop"], lower_better=True)
-        if "gps_trend" in self.labels:
-            self.labels["gps_trend"].set_text(
-                f"sats {sats_tail} ({sats_dir}) • pdop {pdop_tail} ({pdop_dir})"
+            self.latest_aio_states = dict(d.get("aio", {}) or {})
+            self.labels["cpu"].set_text(d.get("cpu", "N/A"))
+            self.labels["ram"].set_text(d.get("ram", "N/A"))
+            self.labels["disk"].set_text(d.get("disk", "N/A"))
+            self.labels["battery"].set_text(d.get("battery", "N/A"))
+            g = d.get("gps", {}) if isinstance(d.get("gps", {}), dict) else {}
+            self.labels["fix"].set_text(g.get("fix", "—"))
+            self.labels["sats"].set_text(g.get("sats", "—"))
+            self.labels["gpsdev"].set_text(g.get("device", "—"))
+            self.labels["pos"].set_text(g.get("pos", "—"))
+            self.labels["speed"].set_text(g.get("speed", "—"))
+            self.labels["track"].set_text(g.get("track", "—"))
+            self.labels["gps_quality"].set_text(
+                f"{g.get('confidence', '—')} {g.get('quality_grade', 'unknown')} • used {g.get('sats_used', '—')}"
             )
-        for dev, state in d["aio"].items():
-            self.set_radio_visual(dev, state)
-
-        fix_text = g["fix"]
-        if "3D" in fix_text or "2D" in fix_text:
-            self.set_chip("chip_fix", f"GPS: {fix_text}", "good")
-        elif "NO FIX" in fix_text:
-            self.set_chip("chip_fix", f"GPS: {fix_text}", "warn")
-        else:
-            self.set_chip("chip_fix", f"GPS: {fix_text}", "muted")
-
-        wifi_ok = len(d["wifi"]) > 0
-        self.set_chip("chip_wifi", f"Wi-Fi: {'OK' if wifi_ok else 'NONE'}", "good" if wifi_ok else "bad")
-        self.set_chip("chip_gpsd", f"gpsd: {d['gpsd']}", "good" if d["gpsd"] == "RUNNING" else "warn")
-        self.set_chip("chip_readsb", f"readsb: {d['readsb']}", "good" if d["readsb"] == "RUNNING" else "muted")
-
-        for service, label in self.service_labels.items():
-            state = d.get("services", {}).get(service, "OFF")
-            dot = self.service_dots.get(service)
-            if dot is None:
-                continue
-            dctx = dot.get_style_context()
-            for cls in ("status-on", "status-off", "status-unknown"):
-                dctx.remove_class(cls)
-            state_upper = str(state).upper()
-            if state_upper == "RUNNING":
-                dctx.add_class("status-on")
-            elif state_upper in ("OFF", "INACTIVE", "DEAD", "FAILED"):
-                dctx.add_class("status-off")
+            self.labels["dop_summary"].set_text(
+                f"{g.get('hdop', '—')} / {g.get('vdop', '—')} / {g.get('pdop', '—')}"
+            )
+            self.labels["gpsd"].set_text(d.get("gpsd", "OFF"))
+            self.labels["readsb"].set_text(d.get("readsb", "OFF"))
+            self.labels["ip"].set_text(d.get("ip", "—"))
+            self.labels["eth"].set_text(d.get("eth", "—"))
+            self.labels["bt"].set_text(d.get("bt", "—"))
+            self.labels["bt_ctrl"].set_text(d.get("bt_ctrl", "none"))
+            # Handle both dict (current API) and list (legacy) formats for Wi-Fi
+            wifi_data = d.get("wifi")
+            if isinstance(wifi_data, dict):
+                iface = wifi_data.get("interface", "")
+                detail = wifi_data.get("ssid", "") or wifi_data.get("ip_address", "")
+                if iface and detail:
+                    self.labels["wifi"].set_text(f"{iface}: {detail}")
+                elif iface:
+                    self.labels["wifi"].set_text(iface)
+                else:
+                    self.labels["wifi"].set_text("—")
+            elif isinstance(wifi_data, list):
+                if wifi_data:
+                    self.labels["wifi"].set_text(" | ".join(f"{iface}: {detail}" for iface, detail in wifi_data[:2]))
+                else:
+                    self.labels["wifi"].set_text("—")
             else:
-                dctx.add_class("status-unknown")
+                self.labels["wifi"].set_text("—")
 
-        bt_state = d.get("services", {}).get("bluetooth", "OFF")
-        bt_state_upper = str(bt_state).upper()
-        if bt_state_upper == "RUNNING":
-            self.set_bluetooth_toggle_visual(True)
-        elif bt_state_upper in ("OFF", "INACTIVE", "DEAD", "FAILED"):
-            self.set_bluetooth_toggle_visual(False)
-        else:
-            self.set_bluetooth_toggle_visual(None)
+            self.update_connectivity_labels(d)
 
-        usb_on = d.get("aio", {}).get("USB") is True
-        self.apply_ac1200_dependency_state(usb_on)
-        self.apply_gps_dependency_state(self.latest_aio_states.get("GPS"))
-        self.apply_sdr_dependency_state(self.latest_aio_states.get("SDR"))
+            try:
+                sats_num = int(g.get("sats"))
+                self.gps_quality_history["sats"].append(sats_num)
+            except Exception:
+                pass
+            pdop_val = g.get("pdop_val")
+            if isinstance(pdop_val, (int, float)):
+                self.gps_quality_history["pdop"].append(float(pdop_val))
 
-        alerts = self.evaluate_alerts(d)
-        self.apply_alerts(alerts)
+            self.gps_quality_history["sats"] = self.gps_quality_history["sats"][-10:]
+            self.gps_quality_history["pdop"] = self.gps_quality_history["pdop"][-10:]
+            sats_tail = format_history_trend(self.gps_quality_history["sats"], 3)
+            pdop_tail = format_history_trend(self.gps_quality_history["pdop"], 3)
+            sats_dir = trend_direction(self.gps_quality_history["sats"], lower_better=False)
+            pdop_dir = trend_direction(self.gps_quality_history["pdop"], lower_better=True)
+            if "gps_trend" in self.labels:
+                self.labels["gps_trend"].set_text(
+                    f"sats {sats_tail} ({sats_dir}) • pdop {pdop_tail} ({pdop_dir})"
+                )
+            # Map lowercase aio keys to uppercase internal radio_dots keys
+            aio_key_map = {"gps": "GPS", "sdr": "SDR", "lora": "LORA", "usb_ac1200": "USB"}
+            for dev, state in d.get("aio", {}).items():
+                internal_dev = aio_key_map.get(dev, dev)
+                self.set_radio_visual(internal_dev, state)
 
-        self.record_mission_sample(d)
+            fix_text = g.get("fix", "—")
+            if "3D" in fix_text or "2D" in fix_text:
+                self.set_chip("chip_fix", f"GPS: {fix_text}", "good")
+            elif "NO FIX" in fix_text:
+                self.set_chip("chip_fix", f"GPS: {fix_text}", "warn")
+            else:
+                self.set_chip("chip_fix", f"GPS: {fix_text}", "muted")
 
-        self.last_update.set_text("Updated: " + datetime.now().strftime("%H:%M:%S"))
+            wifi_ok = len(d.get("wifi", [])) > 0
+            self.set_chip("chip_wifi", f"Wi-Fi: {'OK' if wifi_ok else 'NONE'}", "good" if wifi_ok else "bad")
+            self.set_chip("chip_gpsd", f"gpsd: {d.get('gpsd', 'OFF')}", "good" if d.get("gpsd") == "RUNNING" else "warn")
+            self.set_chip("chip_readsb", f"readsb: {d.get('readsb', 'OFF')}", "good" if d.get("readsb") == "RUNNING" else "muted")
+
+            for service, label in self.service_labels.items():
+                state = d.get("services", {}).get(service, "OFF")
+                dot = self.service_dots.get(service)
+                if dot is None:
+                    continue
+                dctx = dot.get_style_context()
+                for cls in ("status-on", "status-off", "status-unknown"):
+                    dctx.remove_class(cls)
+                state_upper = str(state).upper()
+                if state_upper == "RUNNING":
+                    dctx.add_class("status-on")
+                elif state_upper in ("OFF", "INACTIVE", "DEAD", "FAILED"):
+                    dctx.add_class("status-off")
+                else:
+                    dctx.add_class("status-unknown")
+
+            bt_state = d.get("services", {}).get("bluetooth", "OFF")
+            bt_state_upper = str(bt_state).upper()
+            if bt_state_upper == "RUNNING":
+                self.set_bluetooth_toggle_visual(True)
+            elif bt_state_upper in ("OFF", "INACTIVE", "DEAD", "FAILED"):
+                self.set_bluetooth_toggle_visual(False)
+            else:
+                self.set_bluetooth_toggle_visual(None)
+
+            usb_on = d.get("aio", {}).get("USB") is True
+            self.apply_ac1200_dependency_state(usb_on)
+            self.apply_gps_dependency_state(self.latest_aio_states.get("GPS"))
+            self.apply_sdr_dependency_state(self.latest_aio_states.get("SDR"))
+
+            alerts = self.evaluate_alerts(d)
+            self.apply_alerts(alerts)
+
+            self.record_mission_sample(d)
+
+            self.last_update.set_text("Updated: " + datetime.now().strftime("%H:%M:%S"))
+            self._refreshing = False
+                
+        except Exception as ex:
+            import traceback
+            try:
+                debug_log = APP_DIR.parent / "data_debug.txt"
+                with open(debug_log, "a") as f:
+                    f.write(f"\nEXCEPTION in apply_data: {ex}\n")
+                    f.write(traceback.format_exc())
+                    f.write("\n" + "="*60 + "\n")
+            except Exception:
+                pass
+            self._refreshing = False
+            return False
         return False
 
 Gtk.init([])
-App()
+win = App()
+win.show_all()
+win.fullscreen()
+win.present()
 Gtk.main()

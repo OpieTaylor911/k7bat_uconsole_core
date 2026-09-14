@@ -1,11 +1,12 @@
-﻿[Desktop Entry]
-Version=2.0.0
+[Desktop Entry]
+Version=2.0.3
 Type=Application
-Name=K7BAT uConsole Status v2.0
-Comment=Modern GTK3 dashboard with new UI components for ClockworkPi uConsole
+Name=K7BAT uConsole Status App
+Comment=K7BAT Status App 2.0.3 for ClockworkPi uConsole
 Exec=/usr/local/bin/k7bat-uconsole-status
-Icon=/home/bcaddy/uconsole-k7bat/icons/k7bat-callsign-logo.png
+Icon=k7bat-uconsole-status
 Terminal=false
 Categories=System;Utility;Network;
 StartupNotify=true
 X-GNOME-UsesNotifications=true
+NoDisplay=false

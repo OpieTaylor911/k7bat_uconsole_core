@@ -1,11 +1,21 @@
-"""Reusable GTK widgets for the K7BAT 2.0.0 dashboard."""
+# Widgets module for K7BAT uConsole Status App v2.0.0
 
-from .cards import ActionButton, DeviceRow, MetricCard, SectionHeader, StatusCard
+from .cards import (
+    SidebarNavigation,
+    MetricCard,
+    StatusCard,
+    DeviceRow,
+    SectionHeader,
+    ActionButton,
+    DashboardPage
+)
 
 __all__ = [
-    "ActionButton",
-    "DeviceRow",
-    "MetricCard",
-    "SectionHeader",
-    "StatusCard",
+    'SidebarNavigation',
+    'MetricCard',
+    'StatusCard',
+    'DeviceRow',
+    'SectionHeader',
+    'ActionButton',
+    'DashboardPage'
 ]

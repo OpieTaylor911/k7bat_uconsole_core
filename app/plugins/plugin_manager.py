@@ -1,144 +1,272 @@
 #!/usr/bin/env python3
 """
-Plugin Manager for k7bat uConsole Plugins
+Plugin Manager - Load and manage plugins with configuration system.
 
-This module provides plugin loading and management capabilities.
+This module provides utilities for loading plugins, checking their
+configuration, and running them with proper dependency management.
 """
 
-import os
+import importlib.util
 import sys
-from typing import Dict, List, Any, Optional
 from pathlib import Path
+from typing import Optional, Dict, List, Tuple
 
 
 class PluginManager:
-    """Manages plugin discovery, loading, and version tracking."""
+    """Manages plugin loading and execution."""
     
-    def __init__(self, plugins_dir: Optional[str] = None):
+    def __init__(self, plugins_dir: Optional[Path] = None):
         """
         Initialize the plugin manager.
         
         Args:
-            plugins_dir: Directory containing plugin folders. Defaults to 'plugins' subdirectory.
+            plugins_dir: Directory containing plugins. Defaults to 'plugins' subdirectory
+                        of the directory containing this file.
         """
         if plugins_dir is None:
-            plugins_dir = Path(__file__).parent / "plugins"
-        self.plugins_dir = Path(plugins_dir)
-        self.loaded_plugins: Dict[str, Any] = {}
-        self.plugin_versions: Dict[str, str] = {}
+            plugins_dir = Path(__file__).resolve().parent
         
-    def discover_plugins(self) -> List[Dict[str, Any]]:
-        """
-        Discover available plugins in the plugins directory.
-        
-        Returns:
-            List of plugin information dictionaries
-        """
+        self.plugins_dir = plugins_dir
+        self.loaded_plugins: Dict[str, dict] = {}
+        self.plugin_configs: Dict[str, dict] = {}
+    
+    def discover_plugins(self) -> List[Path]:
+        """Find all plugin files in the plugins directory."""
         plugins = []
         
-        if not self.plugins_dir.exists():
-            return plugins
-            
-        for plugin_dir in self.plugins_dir.iterdir():
-            if plugin_dir.is_dir() and (plugin_dir / "plugin_config.py").exists():
-                plugins.append({
-                    "name": plugin_dir.name,
-                    "path": str(plugin_dir),
-                    "has_config": True
-                })
-                
+        # Look for __init__.py files (package plugins)
+        for item in self.plugins_dir.iterdir():
+            if item.is_dir() and (item / "__init__.py").exists():
+                plugins.append(item / "__init__.py")
+            elif item.suffix == ".py" and item.name != "__init__.py":
+                # Single file plugins
+                plugins.append(item)
+        
         return plugins
     
-    def load_plugin(self, plugin_name: str) -> Optional[Any]:
+    def load_plugin(self, plugin_path: Path) -> Optional[dict]:
         """
-        Load a specific plugin by name.
+        Load a plugin from its path.
         
         Args:
-            plugin_name: Name of the plugin to load
+            plugin_path: Path to the plugin file or directory
             
         Returns:
-            Plugin instance or None if loading fails
+            Plugin configuration dictionary or None if loading failed
         """
-        plugin_dir = self.plugins_dir / plugin_name
-        
-        if not plugin_dir.exists():
-            print(f"Plugin directory not found: {plugin_name}")
-            return None
-            
-        # Import plugin_config to get metadata
-        sys.path.insert(0, str(plugin_dir))
-        
         try:
-            config_module = __import__("plugin_config")
+            # Determine module name
+            if plugin_path.is_dir():
+                module_name = plugin_path.name
+                init_file = plugin_path / "__init__.py"
+                spec = importlib.util.spec_from_file_location(
+                    f"plugins.{module_name}", init_file
+                )
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[f"plugins.{module_name}"] = module
+                spec.loader.exec_module(module)
+                
+                # Check for plugin_config module first
+                config_path = plugin_path / "plugin_config.py"
+                if config_path.exists():
+                    spec = importlib.util.spec_from_file_location(
+                        f"plugins.{module_name}.config", config_path
+                    )
+                    config_module = importlib.util.module_from_spec(spec)
+                    sys.modules[f"plugins.{module_name}.config"] = config_module
+                    spec.loader.exec_module(config_module)
+                    
+                    # Get configuration from plugin_config.py
+                    config = self._extract_plugin_config(config_module)
+                else:
+                    # Try to get config from __init__.py
+                    config = self._extract_plugin_config(module)
+                
+            else:
+                module_name = plugin_path.stem
+                spec = importlib.util.spec_from_file_location(
+                    f"plugins.{module_name}", plugin_path
+                )
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[f"plugins.{module_name}"] = module
+                spec.loader.exec_module(module)
+                
+                config = self._extract_plugin_config(module)
             
-            # Get plugin version
-            version = getattr(config_module, "PLUGIN_VERSION", "0.0.0")
-            self.plugin_versions[plugin_name] = version
+            if config:
+                self.loaded_plugins[module_name] = {
+                    "path": plugin_path,
+                    "module": module
+                }
+                self.plugin_configs[module_name] = config
+                
+                return config
             
-            # Import and instantiate the plugin class
-            module_name = getattr(config_module, "PLUGIN_MODULE", f"{plugin_name}_ui")
-            plugin_module = __import__(module_name)
-            
-            # Get the main plugin class (usually has 'Plugin' in the name)
-            for attr_name in dir(plugin_module):
-                if "plugin" in attr_name.lower() and attr_name != "PluginManager":
-                    plugin_class = getattr(plugin_module, attr_name)
-                    if isinstance(plugin_class, type):
-                        self.loaded_plugins[plugin_name] = plugin_class()
-                        return self.loaded_plugins[plugin_name]
-                        
         except Exception as e:
-            print(f"Error loading plugin {plugin_name}: {e}")
-            return None
-        finally:
-            sys.path.pop(0)
-            
+            print(f"Error loading plugin {plugin_path}: {e}", file=sys.stderr)
+        
         return None
     
-    def load_all_plugins(self) -> Dict[str, Any]:
+    def _extract_plugin_config(self, module) -> Optional[dict]:
         """
-        Load all available plugins.
+        Extract plugin configuration from a module.
         
-        Returns:
-            Dictionary of loaded plugin instances
-        """
-        for plugin_info in self.discover_plugins():
-            self.load_plugin(plugin_info["name"])
+        Args:
+            module: Loaded Python module
             
-        return self.loaded_plugins
-    
-    def get_plugin_version(self, plugin_name: str) -> str:
+        Returns:
+            Plugin configuration dictionary
         """
-        Get the version of a specific plugin.
+        config = {}
+        
+        # Try to get PLUGIN_NAME (required)
+        if hasattr(module, "PLUGIN_NAME"):
+            config["name"] = getattr(module, "PLUGIN_NAME")
+        else:
+            return None  # No plugin metadata found
+        
+        # Optional attributes
+        config["version"] = getattr(module, "PLUGIN_VERSION", "1.0.0")
+        config["requires_sudo"] = getattr(module, "REQUIRES_SUDO", False)
+        config["install_packages"] = getattr(module, "INSTALL_PACKAGES", [])
+        config["setup_instructions"] = getattr(module, "SETUP_INSTRUCTIONS", "")
+        config["permission_commands"] = getattr(module, "PERMISSION_COMMANDS", [])
+        
+        # Check for utility functions
+        if hasattr(module, "get_plugin_info"):
+            info_func = getattr(module, "get_plugin_info")
+            if callable(info_func):
+                info = info_func()
+                config.update(info)
+        
+        return config
+    
+    def load_all_plugins(self) -> Dict[str, dict]:
+        """Load all plugins in the plugins directory."""
+        plugins = self.discover_plugins()
+        
+        for plugin_path in plugins:
+            config = self.load_plugin(plugin_path)
+            if config:
+                print(f"Loaded plugin: {config['name']}")
+        
+        return self.plugin_configs
+    
+    def check_dependencies(self, plugin_name: str) -> Tuple[bool, List[str]]:
+        """
+        Check dependencies for a specific plugin.
         
         Args:
             plugin_name: Name of the plugin
             
         Returns:
-            Plugin version string
+            Tuple of (all_ok: bool, missing_packages: list)
         """
-        if plugin_name in self.plugin_versions:
-            return self.plugin_versions[plugin_name]
-            
-        # Try to load and get version
-        if plugin_name not in self.loaded_plugins:
-            self.load_plugin(plugin_name)
-            
-        if plugin_name in self.loaded_plugins:
-            plugin = self.loaded_plugins[plugin_name]
-            if hasattr(plugin, 'version'):
-                return getattr(plugin, 'version', '0.0.0')
-                
-        return "0.0.0"
+        if plugin_name not in self.plugin_configs:
+            return False, []
+        
+        config = self.plugin_configs[plugin_name]
+        packages = config.get("install_packages", [])
+        
+        import subprocess
+        missing = []
+        
+        for package in packages:
+            try:
+                result = subprocess.run(
+                    ["dpkg-query", "-W", "-f='${Status}'", package],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if "install ok installed" not in result.stdout.lower():
+                    missing.append(package)
+            except Exception:
+                pass
+        
+        return len(missing) == 0, missing
     
-    def get_all_versions(self) -> Dict[str, str]:
-        """
-        Get versions of all loaded plugins.
+    def get_plugin_info(self, plugin_name: str) -> Optional[dict]:
+        """Get information about a specific plugin."""
+        return self.plugin_configs.get(plugin_name)
+    
+    def list_plugins(self) -> List[str]:
+        """List all loaded plugin names."""
+        return list(self.plugin_configs.keys())
+
+
+# ============================================================================
+# Standalone Functions (convenience wrappers)
+# ============================================================================
+
+def load_plugin_from_path(plugin_path: Path) -> Optional[dict]:
+    """
+    Load a single plugin from its path.
+    
+    Args:
+        plugin_path: Path to the plugin file or directory
         
         Returns:
-            Dictionary mapping plugin names to versions
-        """
-        if not self.plugin_versions:
-            self.load_all_plugins()
-            
-        return self.plugin_versions
+            Plugin configuration dictionary
+    """
+    manager = PluginManager()
+    return manager.load_plugin(plugin_path)
+
+
+def load_all_plugins() -> Dict[str, dict]:
+    """
+    Load all plugins in the default plugins directory.
+    
+    Returns:
+        Dictionary of plugin configurations keyed by plugin name
+    """
+    manager = PluginManager()
+    return manager.load_all_plugins()
+
+
+# ============================================================================
+# Main Entry Point (for testing)
+# ============================================================================
+
+if __name__ == "__main__":
+    import gi
+    gi.require_version("Gtk", "3.0")
+    from gi.repository import Gtk
+    
+    print("Loading plugins...")
+    
+    # Load all plugins
+    manager = PluginManager()
+    configs = manager.load_all_plugins()
+    
+    print(f"\nLoaded {len(configs)} plugins:")
+    for name, config in configs.items():
+        print(f"  - {config.get('name', name)} v{config.get('version', '1.0.0')}")
+        
+        # Check dependencies
+        ok, missing = manager.check_dependencies(name)
+        if ok:
+            print(f"    ✓ Dependencies satisfied")
+        else:
+            print(f"    ✗ Missing: {', '.join(missing)}")
+        
+        if config.get("requires_sudo"):
+            print(f"    ⚠ Requires root privileges")
+    
+    # Test showing setup dialog
+    if configs:
+        plugin_name = list(configs.keys())[0]
+        config = configs[plugin_name]
+        
+        dialog = Gtk.MessageDialog(
+            None,
+            0,
+            Gtk.MessageType.INFO,
+            Gtk.ButtonsType.OK,
+            f"Plugin System Ready!\n\n"
+            f"Loaded {len(configs)} plugins.\n"
+            f"First plugin: {config.get('name', 'Unknown')}\n"
+            f"Requires Sudo: {config.get('requires_sudo', False)}"
+        )
+        dialog.run()
+        dialog.destroy()

@@ -1091,6 +1091,9 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self.send_json_response({"error": "Invalid JSON"}, 400)
                 return
+            if not isinstance(data, dict):
+                self.send_json_response({"error": {"code": "invalid_payload", "message": "JSON payload must be an object."}}, 400)
+                return
         else:
             data = {}
         

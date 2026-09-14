@@ -95,14 +95,9 @@ install -m 0644 "$SCRIPT_DIR/app/status_api.py" "$PREFIX/status_api.py"
 install -m 0644 "$SCRIPT_DIR/app/ac1200_diagnostics.py" "$PREFIX/ac1200_diagnostics.py"
 install -m 0755 "$SCRIPT_DIR/app/ac1200_diagnostics.py" /usr/local/bin/k7bat-ac1200-diagnostics
 
-# Install v2.0.0 UI components
-if [ -d "$SCRIPT_DIR/app/styles" ]; then
-  mkdir -p "$PREFIX/styles"
-  for style_file in "$SCRIPT_DIR/app/styles/"*.css; do
-    if [ -f "$style_file" ]; then
-      install -m 0644 "$style_file" "$PREFIX/styles/"
-    fi
-  done
+# Install the canonical 2.0.3 UI theme.
+if [ -f "$SCRIPT_DIR/app/theme.css" ]; then
+  install -m 0644 "$SCRIPT_DIR/app/theme.css" "$PREFIX/theme.css"
 fi
 
 if [ -d "$SCRIPT_DIR/app/widgets" ]; then
@@ -133,11 +128,16 @@ fi
 
 # Install plugin files
 if [ -d "$SCRIPT_DIR/app/plugins" ]; then
-  mkdir -p "$PREFIX/app/plugins"
+  mkdir -p "$PREFIX/plugins"
   for plugin_file in "$SCRIPT_DIR/app/plugins"/*.py; do
     if [ -f "$plugin_file" ]; then
-      install -m 0644 "$plugin_file" "$PREFIX/app/plugins/" || true
+      install -m 0644 "$plugin_file" "$PREFIX/plugins/" || true
       ok "Installed plugin: $(basename "$plugin_file")"
+    fi
+  done
+  for plugin_dir in "$SCRIPT_DIR/app/plugins"/*/; do
+    if [ -d "$plugin_dir" ]; then
+      cp -a "$plugin_dir" "$PREFIX/plugins/"
     fi
   done
   
@@ -165,6 +165,16 @@ if [ -d "$SCRIPT_DIR/app/plugins" ]; then
       fi
     fi
   done
+fi
+
+if [[ -f "$SCRIPT_DIR/app/sidekick_apikey.py" ]]; then
+  install -m 0644 "$SCRIPT_DIR/app/sidekick_apikey.py" "$PREFIX/sidekick_apikey.py"
+fi
+if [[ -f "$SCRIPT_DIR/app/plugins/sidekick_setup_ui.py" ]]; then
+  install -m 0644 "$SCRIPT_DIR/app/plugins/sidekick_setup_ui.py" "$PREFIX/plugins/sidekick_setup_ui.py"
+fi
+if [[ -f "$SCRIPT_DIR/app/k7bat-sidekick-setup" ]]; then
+  install -m 0755 "$SCRIPT_DIR/app/k7bat-sidekick-setup" /usr/local/bin/k7bat-sidekick-setup
 fi
 
 # Keep SDRDecoder as an external plugin rather than vendoring its source into core.
@@ -203,6 +213,12 @@ install -m 0644 "$SCRIPT_DIR/assets/k7bat-uconsole-status.svg" \
 tr -d '\r' < "$SCRIPT_DIR/assets/k7bat-uconsole-status.desktop" \
   > /usr/share/applications/k7bat-uconsole-status.desktop
 chmod 0644 /usr/share/applications/k7bat-uconsole-status.desktop
+
+if [[ -f "$SCRIPT_DIR/assets/k7bat-sidekick-setup.desktop" ]]; then
+  tr -d '\r' < "$SCRIPT_DIR/assets/k7bat-sidekick-setup.desktop" \
+    > /usr/share/applications/k7bat-sidekick-setup.desktop
+  chmod 0644 /usr/share/applications/k7bat-sidekick-setup.desktop
+fi
 
 if [[ -n "${GUI_USER:-}" ]]; then
   log "Configuring passwordless service control for $GUI_USER"

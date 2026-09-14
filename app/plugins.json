@@ -21,6 +21,14 @@
   "tooltip": "In-depth battery diagnostic tool showing charge status, power draw, and battery health (user plugin)"
 },
 {
+  "id": "sidekick-setup",
+  "label": "Sidekick Setup",
+  "check": "",
+  "type": "python",
+  "module": "sidekick_setup_ui.SidekickSetupWindow",
+  "tooltip": "Provision the ESP32 Sidekick's Wi-Fi and uConsole server address over USB serial (user plugin)"
+},
+{
   "id": "pineapple-modules",
   "label": "Hak5 Pineapple",
   "check": "",
@@ -43,13 +51,5 @@
   "type": "python",
   "module": "reaver.reaver_ui.ReaverWindow",
   "tooltip": "Launch Reaver WPS attack tool with GUI interface (user plugin)"
-},
-{
-  "id": "sdrdecoder",
-  "label": "SDRDecoder Ground Station",
-  "check": "python3",
-  "type": "python",
-  "module": "sdrdecoder_plugin.SDRDecoderWindow",
-  "tooltip": "Launch the external SDRDecoder satellite ground-station web console"
 }
 ]
