@@ -25,6 +25,8 @@ import threading
 import subprocess
 import shutil
 import re
+import uuid
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -101,6 +103,45 @@ _events_lock = threading.Lock()
 # Active processes tracking
 _active_processes = {}
 _process_lock = threading.Lock()
+
+_V2_EVENT_SEQUENCE = 0
+_V2_COMMAND_JOBS = {}
+
+
+def _v2_request_id():
+    return f"req-{uuid.uuid4().hex}"
+
+
+def _v2_error(code, message, status_code=400, retry_after_seconds=0):
+    return status_code, {
+        "error": {
+            "code": code,
+            "message": message,
+            "request_id": _v2_request_id(),
+            "retry_after_seconds": retry_after_seconds,
+        }
+    }
+
+
+def _v2_add_freshness(value, updated_at=None, stale_after_seconds=10):
+    result = dict(value or {})
+    result["updated_at"] = updated_at or datetime.now().isoformat()
+    result["stale_after_seconds"] = stale_after_seconds
+    return result
+
+
+def _v2_system_services():
+    services = {}
+    for name in ("gpsd", "gpsd.socket", "bluetooth", "readsb", "NetworkManager"):
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", name],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+            services[name] = result.stdout.strip() or "unknown"
+        except Exception:
+            services[name] = "unavailable"
+    return services
 
 
 def get_status_app_version():
@@ -424,11 +465,15 @@ def set_radio_frequency(freq_hz):
 
 def add_event(event_type, data=None):
     """Add an event to the queue (for Arduino button/touchscreen events)."""
+    global _V2_EVENT_SEQUENCE
+    _V2_EVENT_SEQUENCE += 1
     with _events_lock:
         _events_queue.append({
+            "event": event_type,
             "type": event_type,
             "data": data or {},
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "sequence": _V2_EVENT_SEQUENCE,
         })
 
 
@@ -438,6 +483,11 @@ def get_events():
         events = list(_events_queue)
         _events_queue.clear()
         return events
+
+
+def get_events_since(sequence=0):
+    with _events_lock:
+        return [event for event in _events_queue if event.get("sequence", 0) > sequence]
 
 
 _V2_ALLOWED_PROFILES = [
@@ -509,8 +559,8 @@ def _normalize_v2_status_snapshot():
         "api_version": "2.0",
         "server": os.uname().nodename if hasattr(os, "uname") else "uconsole",
         "profile": _V2_PROFILE_STATE.get("profile", "FIELD"),
-        "system": _normalize_v2_system_status(),
-        "gps": {
+        "system": _v2_add_freshness(_normalize_v2_system_status(), stale_after_seconds=15),
+        "gps": _v2_add_freshness({
             "state": gps.get("status", "no_fix"),
             "latitude": gps.get("latitude"),
             "longitude": gps.get("longitude"),
@@ -520,25 +570,25 @@ def _normalize_v2_status_snapshot():
             "speed_kph": gps.get("speed"),
             "device": gps.get("device"),
             "reason": gps.get("reason", ""),
-        },
-        "adsb": {
+        }, stale_after_seconds=10),
+        "adsb": _v2_add_freshness({
             "state": "unavailable",
             "aircraft": 0,
             "messages": 0,
-        },
-        "meshtastic": {
+        }, stale_after_seconds=10),
+        "meshtastic": _v2_add_freshness({
             "state": "disconnected",
             "nodes": 0,
             "online": 0,
             "channel": "unknown",
-        },
+        }, stale_after_seconds=30),
         "radio": {
             "state": radio.get("status", "idle"),
             "enabled": bool(radio.get("enabled", False)),
             "frequency": radio.get("frequency"),
             "mode": radio.get("mode") or "",
         },
-        "network": _normalize_v2_network_status(),
+        "network": _v2_add_freshness(_normalize_v2_network_status(), stale_after_seconds=15),
         "security": {
             "state": "ok",
             "firewall": "unknown",
@@ -588,7 +638,7 @@ def _v2_handle_command(data):
     command = data.get("command")
     value = data.get("value")
 
-    if target not in {"profile", "screen", "system"}:
+    if target not in {"profile", "screen", "system", "radio", "sdr", "gps", "meshtastic", "app"}:
         return False, {"error": {"code": "unsupported_target", "message": f"Unsupported target: {target}"}}
     if not command:
         return False, {"error": {"code": "missing_command", "message": "command is required."}}
@@ -615,14 +665,21 @@ def _v2_handle_command(data):
             "screen": value,
         }
 
-    return True, {
+    command_id = f"cmd-{uuid.uuid4().hex}"
+    result = {
         "accepted": True,
-        "command_id": f"cmd-{int(datetime.now().timestamp() * 1000)}",
+        "command_id": command_id,
         "state": "queued",
         "target": target,
         "command": command,
         "value": value,
     }
+    _V2_COMMAND_JOBS[command_id] = {
+        **result,
+        "created_at": datetime.now().isoformat(),
+        "completed_at": None,
+    }
+    return True, result
 
 
 def _normalize_mac_address(mac):
@@ -738,6 +795,8 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
     
     def send_json_response(self, data, status_code=200):
         """Send a JSON response."""
+        if isinstance(data, dict) and "request_id" not in data:
+            data = {"request_id": _v2_request_id(), **data}
         self.send_response(status_code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -760,6 +819,81 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
         
         # Update status data on each request for fresh data
         update_status_data()
+
+        if path == '/api/v2/ready':
+            self.send_json_response({
+                "status": "ready",
+                "api": True,
+                "integrations": {
+                    "gps": _status_data.get("gps", {}).get("reason") != "gpsd unavailable",
+                    "radio": RADIO_COORDINATOR is not None,
+                },
+            })
+            return
+
+        if path.startswith('/api/v2/command/'):
+            command_id = path.rsplit('/', 1)[-1]
+            job = _V2_COMMAND_JOBS.get(command_id)
+            if not job:
+                self.send_json_response({"error": {"code": "not_found", "message": "Command job not found."}}, 404)
+                return
+            self.send_json_response(job)
+            return
+
+        if path == '/api/v2/capabilities':
+            self.send_json_response({
+                "api_version": "2.0",
+                "enrollment": True,
+                "commands": True,
+                "telemetry_ingest": True,
+                "websocket": False,
+                "ota": False,
+                "domains": ["system", "network", "gps", "radio", "adsb", "meshtastic", "apps"],
+            })
+            return
+
+        if path == '/api/v2/system/services':
+            self.send_json_response({"services": _v2_system_services(), "updated_at": datetime.now().isoformat()})
+            return
+
+        if path == '/api/v2/system/processes':
+            try:
+                output = subprocess.run(
+                    ["ps", "-eo", "pid,ppid,user,%cpu,%mem,stat,etime,comm,args", "--sort=-%cpu"],
+                    capture_output=True, text=True, timeout=5, check=False,
+                ).stdout.strip().splitlines()
+                processes = output[:41]
+            except Exception:
+                processes = []
+            self.send_json_response({"processes": processes, "updated_at": datetime.now().isoformat()})
+            return
+
+        if path == '/api/v2/system/storage':
+            try:
+                disk = shutil.disk_usage("/")
+                storage = {"total_bytes": disk.total, "free_bytes": disk.free, "used_bytes": disk.used}
+            except OSError:
+                storage = {"state": "unavailable"}
+            self.send_json_response({"storage": storage, "updated_at": datetime.now().isoformat()})
+            return
+
+        if path == '/api/v2/events':
+            try:
+                since = int(query_params.get("since", [0])[0])
+            except (TypeError, ValueError):
+                since = 0
+            events = get_events_since(since)
+            self.send_json_response({"sequence": _V2_EVENT_SEQUENCE, "events": events})
+            return
+
+        if path == '/api/v2/firmware':
+            self.send_json_response({
+                "current_version": get_status_app_version(),
+                "available_version": get_status_app_version(),
+                "update_available": False,
+                "update_policy": "metadata_only",
+            })
+            return
         
         if path == '/api/status' or path == '/':
             # Return full status
@@ -794,9 +928,6 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
         elif path == '/api/v2/apps':
             self.send_json_response({"apps": _status_data.get("apps", {"running": [], "available": []})})
 
-        elif path == '/api/v2/events':
-            self.send_json_response({"events": get_events(), "count": 0})
-
         elif path == '/api/v2/profile':
             self.send_json_response({
                 "profile": _V2_PROFILE_STATE.get("profile", "FIELD"),
@@ -816,11 +947,24 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
 
         elif path.startswith('/api/v2/device/'):
             device_id = path.rsplit('/', 1)[-1]
+            if path.endswith('/config'):
+                device_id = path.split('/')[-2]
             device = _V2_DEVICE_REGISTRY.get(device_id)
             if not device:
                 self.send_json_response({"error": {"code": "device_not_found", "message": f"Device '{device_id}' has not registered."}}, 404)
                 return
-            self.send_json_response({"device": device})
+            if path.endswith('/config'):
+                self.send_json_response({
+                    "device_id": device_id,
+                    "heartbeat_seconds": 30,
+                    "poll_seconds": 5,
+                    "profile": _V2_PROFILE_STATE.get("profile", "FIELD"),
+                    "screen": _V2_PROFILE_STATE.get("screen", "HOME"),
+                    "allowed_screens": list(_V2_ALLOWED_SCREENS),
+                    "features": {"websocket": False, "commands": True, "ota": False},
+                })
+            else:
+                self.send_json_response({"device": device})
 
         elif path == '/ws/v2':
             self.send_json_response({
@@ -943,7 +1087,16 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
                 self.send_json_response({"error": {"code": "device_not_found", "message": f"Device '{device_id}' has not registered."}}, 404)
                 return
             device['last_seen'] = datetime.now().isoformat()
-            self.send_json_response({"accepted": True, "device_id": device_id, "profile": _V2_PROFILE_STATE.get("profile", "FIELD"), "screen": _V2_PROFILE_STATE.get("screen", "HOME")})
+            self.send_json_response({"accepted": True, "device_id": device_id, "profile": _V2_PROFILE_STATE.get("profile", "FIELD"), "screen": _V2_PROFILE_STATE.get("screen", "HOME"), "heartbeat_seconds": 30, "config_changed": False})
+
+        elif path == '/api/v2/telemetry':
+            if not isinstance(data, dict):
+                self.send_json_response({"error": {"code": "invalid_payload", "message": "Telemetry must be an object."}}, 400)
+                return
+            device_id = data.get("device_id")
+            if device_id:
+                _V2_DEVICE_REGISTRY.setdefault(device_id, {"device_id": device_id})["last_telemetry"] = data
+            self.send_json_response({"accepted": True, "device_id": device_id, "received_at": datetime.now().isoformat()})
 
         elif path == '/api/v2/profile':
             if not isinstance(data, dict):
@@ -996,6 +1149,11 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             if not success:
                 self.send_json_response(payload, 400)
                 return
+            _V2_COMMAND_JOBS[payload["command_id"]] = {
+                **payload,
+                "created_at": datetime.now().isoformat(),
+                "completed_at": None,
+            }
             self.send_json_response(payload)
         
         elif path == '/api/command':

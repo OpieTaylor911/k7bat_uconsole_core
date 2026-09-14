@@ -143,6 +143,54 @@ class V2StatusApiTests(unittest.TestCase):
         self.assertEqual(confirm.json().get("status"), "paired")
         self.assertTrue(confirm.json().get("api_key"))
 
+    def test_platformio_discovery_and_data_endpoints(self):
+        capabilities = requests.get(f"http://127.0.0.1:{self.port}/api/v2/capabilities", timeout=5)
+        self.assertEqual(capabilities.status_code, 200)
+        self.assertIn("system", capabilities.json().get("domains", []))
+
+        services = requests.get(f"http://127.0.0.1:{self.port}/api/v2/system/services", timeout=5)
+        self.assertEqual(services.status_code, 200)
+        self.assertIn("services", services.json())
+
+        config = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/device/register",
+            json={"device_id": "config-device", "name": "Config Device"},
+            timeout=5,
+        )
+        self.assertEqual(config.status_code, 200)
+        device_config = requests.get(
+            f"http://127.0.0.1:{self.port}/api/v2/device/config-device/config",
+            timeout=5,
+        )
+        self.assertEqual(device_config.status_code, 200)
+        self.assertNotIn("api_key", device_config.json())
+
+        telemetry = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/telemetry",
+            json={"device_id": "config-device", "battery_percent": 80},
+            timeout=5,
+        )
+        self.assertEqual(telemetry.status_code, 200)
+
+    def test_command_job_and_event_replay(self):
+        command = requests.post(
+            f"http://127.0.0.1:{self.port}/api/v2/command",
+            json={"target": "radio", "command": "set_frequency", "value": 433000000},
+            timeout=5,
+        )
+        self.assertEqual(command.status_code, 200)
+        command_id = command.json()["command_id"]
+        job = requests.get(f"http://127.0.0.1:{self.port}/api/v2/command/{command_id}", timeout=5)
+        self.assertEqual(job.status_code, 200)
+        self.assertEqual(job.json().get("command_id"), command_id)
+
+        status_api.add_event("profile.changed", {"profile": "FIELD"})
+        events = requests.get(
+            f"http://127.0.0.1:{self.port}/api/v2/events?since=0", timeout=5
+        )
+        self.assertEqual(events.status_code, 200)
+        self.assertTrue(events.json().get("events"))
+
 
 if __name__ == "__main__":
     unittest.main()

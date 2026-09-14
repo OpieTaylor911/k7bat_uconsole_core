@@ -654,3 +654,54 @@ The fallback rules should be:
 
 The goal is to keep the Sidekick useful even when local network or service connectivity is degraded.
 
+---
+
+## 15. PlatformIO endpoint contract
+
+PlatformIO/LVGL firmware should be able to operate with this small core set:
+
+```text
+GET  /api/v2/version
+GET  /api/v2/capabilities
+GET  /api/v2/ready
+POST /api/v2/device/enroll/start
+POST /api/v2/device/enroll/confirm
+POST /api/v2/device/register
+GET  /api/v2/device/{device_id}/config
+GET  /api/v2/status
+POST /api/v2/device/heartbeat
+POST /api/v2/telemetry
+POST /api/v2/command
+GET  /api/v2/command/{command_id}
+GET  /api/v2/events?since={sequence}
+```
+
+Additional domain reads:
+
+```text
+GET /api/v2/system/services
+GET /api/v2/system/processes
+GET /api/v2/system/storage
+GET /api/v2/gps/satellites
+GET /api/v2/gps/track
+GET /api/v2/adsb/aircraft
+GET /api/v2/meshtastic/nodes
+GET /api/v2/meshtastic/messages
+GET /api/v2/firmware
+```
+
+All JSON responses include a `request_id`. Domain data should include `updated_at` and `stale_after_seconds` so LVGL can mark old data without blocking the UI.
+
+Authenticated requests use:
+
+```http
+Authorization: Bearer k7_sk_...
+X-Device-ID: sidekick-001
+X-API-Version: 2.0
+X-Client-Version: 1.0.0
+```
+
+Enrollment is the bootstrap exception. After confirmation, save the returned key in NVS or protected LittleFS and use it for subsequent calls.
+
+Command targets are allowlisted: `profile`, `screen`, `system`, `radio`, `sdr`, `gps`, `meshtastic`, and `app`. The API must never accept arbitrary shell commands from a Sidekick.
+
