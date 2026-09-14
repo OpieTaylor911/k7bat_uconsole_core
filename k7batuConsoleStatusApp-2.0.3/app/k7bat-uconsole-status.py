@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import tarfile
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -1706,7 +1707,9 @@ class App(Gtk.Window):
         gps_page = add_tab("GPS")
         gps_cols = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         task_page = add_tab("TaskManager")
+        api_page = add_tab("API Status")
         plugins_page = add_tab("Plugins")
+        notebook.connect("switch-page", self.on_main_tab_changed)
 
         status_cols = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         status_page.pack_start(status_cols, False, False, 0)
@@ -1903,6 +1906,34 @@ class App(Gtk.Window):
         task_page.pack_start(task_scroll, True, True, 0)
         self.refresh_task_manager()
 
+        # API Status tab: endpoint contract checks run when this tab is opened.
+        api_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        api_title = Gtk.Label(label="Sidekick API Endpoint Status")
+        api_title.set_xalign(0)
+        api_title.get_style_context().add_class("section-title")
+        api_header.pack_start(api_title, True, True, 0)
+        api_refresh = Gtk.Button(label="Check Now")
+        self.decorate_button(api_refresh, "dashboard", "Check API endpoints")
+        api_refresh.connect("clicked", lambda _b: self.run_api_status_checks())
+        api_header.pack_end(api_refresh, False, False, 0)
+        api_page.pack_start(api_header, False, False, 0)
+
+        self.api_status_summary = Gtk.Label(label="Open this tab to check the API.")
+        self.api_status_summary.set_xalign(0)
+        self.api_status_summary.get_style_context().add_class("subtle")
+        api_page.pack_start(self.api_status_summary, False, False, 0)
+
+        api_scroll = Gtk.ScrolledWindow()
+        api_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        api_scroll.set_vexpand(True)
+        self.api_status_text = Gtk.TextView()
+        self.api_status_text.set_editable(False)
+        self.api_status_text.set_cursor_visible(False)
+        self.api_status_text.set_monospace(True)
+        self.api_status_text.set_wrap_mode(Gtk.WrapMode.NONE)
+        api_scroll.add(self.api_status_text)
+        api_page.pack_start(api_scroll, True, True, 0)
+
                 # Plugins section (on its own tab, launchers moved to main page)
         pluginbox = self.make_frame(plugins_page, "Plugins")
         self.header_plugin_info = Gtk.Label(label="Plugins: loading…")
@@ -1936,6 +1967,113 @@ class App(Gtk.Window):
             GLib.idle_add(self.on_start_sidekick_api_clicked, None)
         # Use manual timing instead of GLib timeout to avoid tight loop bug
         GLib.timeout_add_seconds(1, self.check_refresh_schedule)
+
+    def on_main_tab_changed(self, _notebook, _page, page_num):
+        """Run the API contract check whenever the API Status tab is opened."""
+        if page_num < 0:
+            return
+        tab_label = _notebook.get_tab_label(_page)
+        if tab_label and tab_label.get_text() == "API Status":
+            self.run_api_status_checks()
+
+    def run_api_status_checks(self):
+        """Check safe GET/POST API endpoints without blocking the GTK thread."""
+        if getattr(self, "_api_check_running", False):
+            return
+        self._api_check_running = True
+        self.api_status_summary.set_text("Checking API endpoints…")
+        self.api_status_text.get_buffer().set_text("Starting API checks…\n")
+        threading.Thread(target=self._api_status_worker, daemon=True).start()
+
+    def _api_status_worker(self):
+        base_url = self.settings.get("sidekick_api_url", "http://127.0.0.1:8080").rstrip("/")
+        device_id = f"api-status-{os.getpid()}-{int(time.time())}"
+        mac_address = "AA:BB:CC:DD:EE:70"
+        checks = [
+            ("GET", "/api/health", None, {200}),
+            ("GET", "/api/version", None, {200}),
+            ("GET", "/api/v2/health", None, {200}),
+            ("GET", "/api/v2/version", None, {200}),
+            ("GET", "/api/v2/capabilities", None, {200}),
+            ("GET", "/api/v2/ready", None, {200}),
+            ("GET", "/api/v2/schema", None, {200}),
+            ("GET", "/api/v2/status", None, {200}),
+            ("GET", "/api/v2/system", None, {200}),
+            ("GET", "/api/v2/system/services", None, {200}),
+            ("GET", "/api/v2/system/processes", None, {200}),
+            ("GET", "/api/v2/system/storage", None, {200}),
+            ("GET", "/api/v2/network", None, {200}),
+            ("GET", "/api/v2/network/interfaces", None, {200}),
+            ("GET", "/api/v2/gps", None, {200}),
+            ("GET", "/api/v2/gps/satellites", None, {200}),
+            ("GET", "/api/v2/gps/track", None, {200}),
+            ("GET", "/api/v2/radio", None, {200}),
+            ("GET", "/api/v2/sdr", None, {200}),
+            ("GET", "/api/v2/adsb/aircraft", None, {200}),
+            ("GET", "/api/v2/meshtastic/nodes", None, {200}),
+            ("GET", "/api/v2/meshtastic/messages", None, {200}),
+            ("GET", "/api/v2/apps", None, {200}),
+            ("GET", "/api/v2/firmware", None, {200}),
+            ("POST", "/api/v2/device/register", {
+                "device_id": device_id,
+                "name": "API Status Check",
+                "board": "status-app",
+                "firmware": APP_VERSION,
+                "mac_address": mac_address,
+                "features": {"api_status_check": True},
+            }, {200}),
+            ("POST", "/api/v2/device/heartbeat", {"device_id": device_id}, {200}),
+            ("POST", "/api/v2/telemetry", {"device_id": device_id, "source": "status-app-check"}, {200}),
+            ("POST", "/api/v2/profile", {"profile": "FIELD"}, {200}),
+            ("POST", "/api/v2/screen", {"screen": "HOME"}, {200}),
+            ("POST", "/api/v2/command", {"target": "system", "command": "status"}, {200}),
+            ("POST", "/api/v2/device/enroll/start", {
+                "device_id": device_id,
+                "name": "API Status Check",
+                "mac_address": mac_address,
+                "board": "status-app",
+            }, {200}),
+            ("POST", "/api/v2/device/enroll/confirm", {
+                "device_id": device_id,
+                "mac_address": mac_address,
+                "code": "000000",
+            }, {400}),
+        ]
+        lines = [f"API base: {base_url}", "", "METHOD  STATUS  EXPECTED  ENDPOINT", "------  ------  --------  --------"]
+        passed = 0
+        for method, path, payload, expected in checks:
+            try:
+                body = None
+                headers = {"Accept": "application/json"}
+                if payload is not None:
+                    body = json.dumps(payload).encode("utf-8")
+                    headers["Content-Type"] = "application/json"
+                request = urllib.request.Request(
+                    f"{base_url}{path}", data=body, headers=headers, method=method
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    status_code = response.status
+                    response.read(2048)
+                result = "PASS" if status_code in expected else "FAIL"
+            except urllib.error.HTTPError as exc:
+                status_code = exc.code
+                result = "PASS" if status_code in expected else "FAIL"
+            except Exception as exc:
+                status_code = "ERR"
+                result = f"FAIL ({str(exc)[:45]})"
+            if result == "PASS":
+                passed += 1
+            expected_text = "/".join(str(code) for code in sorted(expected))
+            lines.append(f"{method:<7} {str(status_code):<7} {expected_text:<9} {path}  {result}")
+
+        total = len(checks)
+        GLib.idle_add(self._apply_api_status_results, lines, passed, total)
+
+    def _apply_api_status_results(self, lines, passed, total):
+        self.api_status_text.get_buffer().set_text("\n".join(lines) + "\n")
+        self.api_status_summary.set_text(f"API checks complete: {passed}/{total} passed")
+        self._api_check_running = False
+        return False
 
     def check_refresh_schedule(self):
         """Manually check if 5 seconds have passed since last refresh"""
